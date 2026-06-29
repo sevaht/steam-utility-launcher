@@ -1,0 +1,94 @@
+[build-system]
+requires = ["hatchling (>=1.29.0,<2.0.0)", "hatch-vcs (>=0.5.0,<1.0.0)"]
+build-backend = "hatchling.build"
+
+[project]
+name = "steam-utility-launcher"
+dynamic = ["version"]
+description = "Downloads and runs game tools within the same Proton prefix as a given Steam game."
+authors = [
+    {name = "Jacob McIntosh", email = "nacitar.sevaht@gmail.com"}
+]
+readme = "README.md"
+license = "Unlicense"
+requires-python = ">=3.12"
+keywords = ["steam", "proton", "games", "trainers", "linux"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Environment :: Console",
+    "Typing :: Typed",
+]
+dependencies = [
+    "vdf (>=3.4,<4.0)",
+]
+
+[project.scripts]
+steam-utility-launcher = "steam_utility_launcher.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/nacitar/steam-utility-launcher"
+Source = "https://github.com/nacitar/steam-utility-launcher"
+Issues = "https://github.com/nacitar/steam-utility-launcher/issues"
+
+[dependency-groups]
+dev = [
+    "black (>=26.3.1,<27.0.0)",
+    "build (>=1.4.2,<2.0.0)",
+    "mypy (>=1.20.0,<2.0.0)",
+    "pytest (>=9.0.2,<10.0.0)",
+    "ruff (>=0.15.8,<0.16.0)",
+    "twine (>=6.2.0,<7.0.0)",
+    "vulture (>=2.14,<3.0.0)",
+]
+
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0.dev0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/steam_utility_launcher"]
+
+[tool.hatch.build.targets.sdist]
+# Allowlist so dev/local files (.claude, checks, publish-test.sh, .github, ...)
+# never leak into a published sdist. pyproject.toml/PKG-INFO/README/.gitignore
+# are force-included by hatchling regardless.
+include = ["/src", "/tests", "/LICENSE"]
+
+[tool.black]
+line-length = 79
+skip-magic-trailing-comma = true
+
+[tool.mypy]
+strict = true
+exclude = ["^dist/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 79
+
+[tool.ruff.lint]
+extend-ignore = ["COM812", "COM819", "E203", "E501", "TD003"]
+select = [
+    "A", "ANN", "ARG", "ASYNC", "B", "BLE", "C4", "C90", "COM",
+    "DTZ", "E", "EM", "ERA", "F", "FA", "FLY", "FURB", "I",
+    "ISC", "LOG", "N", "PERF", "PGH", "PIE", "PLR", "PLW", "PTH",
+    "Q", "RET", "RSE", "RUF", "S", "SIM", "TC", "TCH", "TD",
+    "TID", "TRY", "UP"
+]
+
+[tool.ruff.lint.per-file-ignores]
+"checks" = ["S603"]
+"tests/**/*" = ["PLR2004", "S101"]
+
+[tool.vulture]
+min_confidence = 70
