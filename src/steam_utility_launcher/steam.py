@@ -366,33 +366,6 @@ class Steam:
                 continue
         return None
 
-    @staticmethod
-    def _env_from_wineserver(
-        game_id: str, keys: set[str]
-    ) -> dict[str, str]:
-        app_id_marker = f"SteamAppId={game_id}".encode()
-        for pid_dir in Path("/proc").iterdir():
-            if not pid_dir.name.isdigit():
-                continue
-            try:
-                if (pid_dir / "exe").resolve().name != "wineserver":
-                    continue
-                raw = (pid_dir / "environ").read_bytes()
-                items = raw.split(b"\0")
-                if not any(item == app_id_marker for item in items):
-                    continue
-                result: dict[str, str] = {}
-                for item in items:
-                    if b"=" not in item:
-                        continue
-                    k, _, v = item.partition(b"=")
-                    key = k.decode("utf-8", errors="replace")
-                    if key in keys:
-                        result[key] = v.decode("utf-8", errors="replace")
-                return result
-            except (FileNotFoundError, PermissionError, OSError):
-                continue
-        return {}
 
     @classmethod
     def from_location(cls, location: SteamLocation) -> Steam:
@@ -516,22 +489,19 @@ class Steam:
         if is_wine:
             self._ensure_steamapps_mapping(game_id=game_id)
             compat_data_path = self.game_compatdata_path(game_id=game_id)
-            wine_prefix = self.game_wine_prefix(game_id=game_id)
             env.update(
                 {
                     "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(
                         self.location.root
                     ),
-                    "WINEPREFIX": str(wine_prefix),
+                    "WINEPREFIX": str(self.game_wine_prefix(game_id=game_id)),
                     "STEAM_COMPAT_DATA_PATH": str(compat_data_path),
                     "SteamAppId": game_id,
                     "SteamGameId": game_id,
+                    "WINEFSYNC": "1",
+                    "WINESYNC": "1",
+                    "WINEESYNC": "1",
                 }
-            )
-            env.update(
-                self._env_from_wineserver(
-                    game_id, {"WINEFSYNC", "WINESYNC", "WINEESYNC"}
-                )
             )
             logger.info(f"Process will run in prefix: {command_line}")
         else:
