@@ -366,7 +366,6 @@ class Steam:
                 continue
         return None
 
-
     @classmethod
     def from_location(cls, location: SteamLocation) -> Steam:
         compatibility_tools = [

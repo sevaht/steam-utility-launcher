@@ -9,8 +9,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import dsr_gadget, hitman_peacock, silky_souls
 from .steam import Steam
+from .utilities import dsr_gadget, hitman_peacock, silky_souls
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

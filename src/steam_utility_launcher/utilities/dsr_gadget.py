@@ -3,13 +3,13 @@ from __future__ import annotations
 import re
 import sys
 
-from .github_release_updater import (
+from steam_utility_launcher.github_release_updater import (
     ApplicationUpdater,
     ArchiveFormat,
     Asset,
     GitHubRepository,
 )
-from .steam import Process, Steam
+from steam_utility_launcher.steam import Process, Steam
 
 
 def launch(*, steam: Steam | None = None) -> int:
