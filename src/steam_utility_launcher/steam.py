@@ -340,6 +340,34 @@ class SteamLocation:
     def config_vdf(self) -> Path:
         return self.root / "config" / "config.vdf"
 
+    @property
+    def library_folders_vdf(self) -> Path:
+        return self.steamapps / "libraryfolders.vdf"
+
+    @property
+    def library_paths(self) -> list[Path]:
+        paths = [self.root]
+        vdf_path = self.library_folders_vdf
+        if not vdf_path.exists():
+            return paths
+        try:
+            libraryfolders = VDFNode.from_path(vdf_path).section(
+                "libraryfolders"
+            )
+        except (KeyError, TypeError, OSError):
+            logger.warning(
+                f"Exception when loading {vdf_path}:", exc_info=True
+            )
+            return paths
+        for key in libraryfolders.tree:
+            try:
+                path = Path(libraryfolders.section(key)["path"])
+            except (KeyError, TypeError):
+                continue
+            if path not in paths:
+                paths.append(path)
+        return paths
+
 
 @dataclass
 class Steam:
@@ -409,8 +437,20 @@ class Steam:
             [game_id, "name"], tool_mapping.get(["0", "name"], "")
         )
 
+    def game_library_path(self, *, game_id: str) -> Path:
+        for library in self.location.library_paths:
+            manifest = library / "steamapps" / f"appmanifest_{game_id}.acf"
+            if manifest.exists():
+                return library
+        return self.location.root
+
     def game_compatdata_path(self, *, game_id: str) -> Path:
-        return self.location.root / "steamapps" / "compatdata" / game_id
+        return (
+            self.game_library_path(game_id=game_id)
+            / "steamapps"
+            / "compatdata"
+            / game_id
+        )
 
     def game_wine_prefix(self, *, game_id: str) -> Path:
         return self.game_compatdata_path(game_id=game_id) / "pfx"

@@ -48,7 +48,7 @@ def _validated_https_url(url: str) -> tuple[str, str]:
     return parsed.netloc, path
 
 
-def _https_get(url: str) -> tuple[int, bytes]:
+def https_get(url: str) -> tuple[int, bytes]:
     current_url = url
     for _ in range(5):
         host, path = _validated_https_url(current_url)
@@ -130,7 +130,7 @@ class GitHubRepository:
             attempts = max(type(self).RETRY_COUNT, 0) + 1
             response_status = 0
             for attempt in range(attempts):
-                response_status, body = _https_get(url)
+                response_status, body = https_get(url)
                 if response_status == HTTP_STATUS_OK:
                     data = json.loads(body.decode())
                     return Release(
@@ -532,7 +532,7 @@ class ApplicationUpdater:
             else staging_destination / (asset.rename_file or name)
         )
         logger.debug(f"Downloading {asset_url} to: {target_file}")
-        _, content = _https_get(asset_url)
+        _, content = https_get(asset_url)
         target_file.write_bytes(content)
         if not asset.archive_format:
             return {

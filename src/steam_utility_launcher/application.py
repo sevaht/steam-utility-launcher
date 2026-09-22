@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .steam import Steam
-from .utilities import dsr_gadget, hitman_peacock, silky_souls
+from .utilities import dsr_gadget, hitman_peacock, rotk_launcher, silky_souls
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -79,6 +79,34 @@ def configure_logging(
     logger.info("logging configured")
 
 
+def _add_game_id_group(parser: argparse.ArgumentParser) -> None:
+    game_id_group = parser.add_mutually_exclusive_group(required=True)
+    game_id_group.add_argument(
+        "-a",
+        "--auto",
+        action="store_true",
+        help="Automatically detect the game presently running in proton.",
+    )
+    game_id_group.add_argument(
+        "-g",
+        "--game-id",
+        help=(
+            "The steam appid of the game.  Present in the store page URL."
+            "  Dark Souls Remastered is 570940, for example."
+        ),
+    )
+
+
+def _resolve_game_id(args: argparse.Namespace) -> str:
+    if args.auto:
+        game_id = Steam.running_proton_game_id()
+        if not game_id:
+            msg = "Could not detect a game running in proton."
+            raise RuntimeError(msg)
+        return game_id
+    return str(args.game_id)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -121,21 +149,14 @@ def _build_parser() -> argparse.ArgumentParser:
     manual_parser = subparsers.add_parser(
         "manual", help="Run with a manual invocation."
     )
-    manual_game_id_group = manual_parser.add_mutually_exclusive_group(
-        required=True
-    )
-    manual_game_id_group.add_argument(
-        "-a",
-        "--auto",
+    _add_game_id_group(manual_parser)
+    manual_parser.add_argument(
+        "-w",
+        "--wait",
         action="store_true",
-        help="Automatically detect the game presently running in proton.",
-    )
-    manual_game_id_group.add_argument(
-        "-g",
-        "--game-id",
         help=(
-            "The steam appid of the game.  Present in the store page URL."
-            "  Dark Souls Remastered is 570940, for example."
+            "Wait for the launched process to exit, then exit with its"
+            " status code."
         ),
     )
     manual_parser.add_argument(
@@ -143,6 +164,11 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs=argparse.REMAINDER,
         help="The command line of the binary to execute.",
     )
+    prefix_path_parser = subparsers.add_parser(
+        "prefix-path",
+        help="Print the Proton (WINE) prefix path used by a game.",
+    )
+    _add_game_id_group(prefix_path_parser)
     subparsers.add_parser(
         "hitman-peacock", help="Run Hitman's Peacock private server."
     )
@@ -152,17 +178,33 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "silky-souls", help="Run the Dark Souls: Remastered SilkySouls tool."
     )
+    rotk_launcher_parser = subparsers.add_parser(
+        "rotk-launcher",
+        help="Install and run ROTK Launcher for Z1 Battle Royale.",
+    )
+    rotk_launcher_parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Install the latest ROTK Launcher release even if one is"
+            " already installed. Without this, an existing installation is"
+            " left as-is (ROTK Launcher updates itself once running); a"
+            " newer release only triggers a log warning."
+        ),
+    )
 
     return parser
 
 
-def _launch_preset(mode: str, steam: Steam | None) -> int:
+def _launch_preset(mode: str, steam: Steam | None, *, force: bool) -> int:
     if mode == "hitman-peacock":
         return hitman_peacock.launch(steam=steam)
     if mode == "dsr-gadget":
         return dsr_gadget.launch(steam=steam)
     if mode == "silky-souls":
         return silky_souls.launch(steam=steam)
+    if mode == "rotk-launcher":
+        return rotk_launcher.launch(steam=steam, force=force)
     raise NotImplementedError
 
 
@@ -186,17 +228,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.command_line:
             parser.error("You must specify a command to run.")
         steam = Steam.from_detection()
-
-        if args.auto:
-            game_id = Steam.running_proton_game_id()
-            if not game_id:
-                msg = "Could not detect a game running in proton."
-                raise RuntimeError(msg)
-        else:
-            game_id = args.game_id
-        steam.process_in_prefix(args.command_line, game_id=game_id).start()
-    elif args.mode in {"hitman-peacock", "dsr-gadget", "silky-souls"}:
+        game_id = _resolve_game_id(args)
+        child = steam.process_in_prefix(
+            args.command_line, game_id=game_id
+        ).start()
+        if args.wait:
+            logger.info("Waiting for pid=%s to exit...", child.pid)
+            return_code = child.wait()
+            logger.info(
+                "pid=%s exited with status code %s", child.pid, return_code
+            )
+            return return_code
+    elif args.mode == "prefix-path":
+        steam = Steam.from_detection()
+        game_id = _resolve_game_id(args)
+        print(steam.game_wine_prefix(game_id=game_id))
+    elif args.mode in {
+        "hitman-peacock",
+        "dsr-gadget",
+        "silky-souls",
+        "rotk-launcher",
+    }:
         if sys.platform == "linux":
             steam = Steam.from_detection()
-        return _launch_preset(args.mode, steam)
+        return _launch_preset(
+            args.mode, steam, force=getattr(args, "force", False)
+        )
     return 0

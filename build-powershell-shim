@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Rebuilds the prebuilt powershell.exe compatibility shim binaries from
+# src/steam_utility_launcher/resources/powershell_shim.c. Only needed when
+# that source changes; end users never need this or a mingw-w64
+# cross-compiler, since the built binaries are committed and shipped with
+# the package.
+#
+# On Arch Linux, the required compilers come from: mingw-w64-gcc
+set -euo pipefail
+cd "$(dirname "$0")"
+
+source_file=src/steam_utility_launcher/resources/powershell_shim.c
+declare -A compilers=(
+    [i686]=i686-w64-mingw32-gcc
+    [x86_64]=x86_64-w64-mingw32-gcc
+)
+for arch in "${!compilers[@]}"; do
+    compiler="${compilers[$arch]}"
+    if ! command -v "$compiler" >/dev/null; then
+        echo "Missing cross-compiler: $compiler" >&2
+        exit 1
+    fi
+    output="src/steam_utility_launcher/resources/powershell_${arch}.exe"
+    "$compiler" -municode -mconsole -O2 -Wall -o "$output" "$source_file"
+    echo "Built $output"
+done
