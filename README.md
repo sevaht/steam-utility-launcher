@@ -83,16 +83,13 @@ PowerShell one-liner to check whether an old instance of itself is running
 before installing, treating exit `0` as "yes, it's running" — since the
 stub always exits `0`, it would otherwise conclude the app is permanently
 running and get stuck forever on a "cannot be closed" dialog. To avoid
-that, `rotk-launcher` temporarily swaps in a small native
-`powershell.exe` replacement (see `resources/powershell_shim.c`) that
-answers that specific check using real Win32 process enumeration, only for
-the duration of the installer subprocess. Whatever was at `powershell.exe`
-before (Wine's stub, in practice) is put back exactly as it was immediately
-afterward, so nothing about the prefix is left changed. The shim binaries
-are prebuilt and shipped with the package, so this needs nothing extra
-installed. (Maintainers rebuilding them from `resources/powershell_shim.c`
-after a change need a mingw-w64 cross-compiler — see
-`build-powershell-shim` at the repo root.)
+that, `rotk-launcher` disables `powershell.exe` (via `WINEDLLOVERRIDES`) for
+just the installer and app processes it starts, making it fail to launch
+instead of falsely succeeding. The installer's own template already handles
+PowerShell being unavailable, falling back to `tasklist`/`findstr`/
+`taskkill` to answer the same check. Nothing is written to the prefix, and
+the override applies only to those processes; the shared Proton installation
+and every other prefix and process are untouched.
 
 ### Manual usage
 

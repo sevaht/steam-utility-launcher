@@ -5,7 +5,6 @@ import logging
 import os
 import re
 import sys
-from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,9 +17,6 @@ from steam_utility_launcher.github_release_updater import (
     https_get,
 )
 from steam_utility_launcher.steam import Process, Steam
-from steam_utility_launcher.wine_powershell_shim import (
-    temporary_powershell_shim,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +63,29 @@ def _run_in_context(
     steam: Steam | None, prefix: Path | None, command_line: list[str]
 ) -> Process:
     if prefix is not None:
-        return _require_steam(steam).process_in_prefix(
+        process = _require_steam(steam).process_in_prefix(
             command_line, game_id=GAME_ID
         )
+        # Wine's powershell.exe is an unimplemented stub: it never runs the
+        # script it's given and always exits 0. ROTK Launcher's NSIS
+        # installer (and its own in-app auto-updater, which invokes the
+        # same installer) uses a PowerShell one-liner to check whether an
+        # old instance of itself is running before installing, treating
+        # exit 0 as "yes, it's running" - since the stub always exits 0, it
+        # would otherwise conclude the app is permanently running and get
+        # stuck forever on a "cannot be closed" dialog. Disabling
+        # powershell.exe for just this process makes it fail to launch
+        # instead, which the installer already handles: its bundled
+        # allowOnlyOneInstallerInstance.nsh template falls back to
+        # tasklist/findstr/taskkill whenever PowerShell isn't available.
+        # Nothing is written to the prefix.
+        assert process.env is not None  # noqa: S101 - set by process_in_prefix
+        existing = process.env.get("WINEDLLOVERRIDES", "")
+        override = "powershell.exe=d"
+        process.env["WINEDLLOVERRIDES"] = (
+            f"{existing};{override}" if existing else override
+        )
+        return process
     return Process(command_line)
 
 
@@ -165,12 +181,7 @@ def _install_if_needed(
         return
 
     logger.info('Installing ROTK Launcher "%s"...', release.tag)
-    shim_context = (
-        temporary_powershell_shim(prefix)
-        if prefix is not None
-        else nullcontext()
-    )
-    with shim_context, TemporaryDirectory() as staging_dir:
+    with TemporaryDirectory() as staging_dir:
         installer_path = Path(staging_dir) / asset_name.name
         _download_installer(release, asset_name, installer_path)
         installer_process = _run_in_context(
