@@ -91,6 +91,105 @@ PowerShell being unavailable, falling back to `tasklist`/`findstr`/
 the override applies only to those processes; the shared Proton installation
 and every other prefix and process are untouched.
 
+**Hardware ID (`hwid_required`).** ROTK's account service now refuses launches
+that carry no hardware fingerprint, and the app collects it by running
+PowerShell/WMI queries, which Wine's stub can't answer. While the app runs,
+this tool therefore replaces the prefix's `powershell.exe` (both `system32`
+and `syswow64`, each with its own architecture's build) with a small native
+Windows program (`resources/wine_powershell_hwid.c`, prebuilt by
+`build-powershell-hwid`) and puts the original back when the app exits. It
+must be a real `.exe`: Wine can't connect a Windows process's pipes to a
+native Unix program, and spawning one that way crashes the launcher.
+
+The stand-in never executes the script it is given, and it only answers the
+**exact** fingerprint query ROTK Launcher 2.0.24 sends: the same scaffold, only
+slot names it knows, and, for every slot, the byte-for-byte PowerShell
+expression the launcher uses for it (copied from its source into a table in
+`resources/wine_powershell_hwid.c`). It answers with this machine's **real**
+values (the prefix's `MachineGuid`, the C: volume serial, the first disk's
+serial/model/firmware, DMI/BIOS data, CPU name, physical MAC addresses).
+Anything it can't read is omitted, never invented. The ROTK team does not
+officially support Linux, so their server may still decide to refuse it, and
+the app's TPM attestation (which also needs PowerShell) is not supported and is
+skipped.
+
+Every PowerShell command that reaches the stand-in is appended to
+`~/.local/share/steam-utility-launcher/powershell-commands.log`; `rotk-launcher`
+prints that path at the start of every run. Each record has a verdict:
+
+- `answered`: the exact fingerprint query. Only the slot names are logged
+  (answered, unreadable here, or without a reader), never the hardware values.
+- `declined`: anything else, such as the installer's availability probes, TPM
+  and diagnostics scripts. It exits 1 with no output, as a missing PowerShell
+  would, which is what those callers expect.
+- `HWID-UNRECOGNIZED`: a command that references hardware-ID data (the WMI
+  classes and registry value the fingerprint reads, or the fingerprint's
+  scaffold) but is not exactly the query above, for example because ROTK
+  reworded it, changed a slot's expression, or added a slot. The stand-in
+  refuses it and makes sure you notice: the record says which part differed, a
+  message box is shown (by a separate process, so it outlives the call), a
+  message goes to stderr naming the log, it exits 190, and `rotk-launcher`
+  prints an error with the log path when the app exits. It never guesses at a
+  changed format, so a wrongly formatted value is never sent. The fix is to
+  update the stand-in to match.
+
+Two environment variables exist for testing: `SUL_POWERSHELL_LOG` (log file,
+set by `rotk-launcher`; default `%TEMP%\sul-powershell-commands.log`) and
+`SUL_POWERSHELL_NO_POPUP` (suppress the message box).
+
+#### Visual C++ runtime
+
+ROTK's anti-cheat module is built with a recent MSVC and needs a recent
+`msvcp140.dll`. Its `std::mutex` needs no initialization call, but the 2016
+`msvcp140.dll` that Steam's redistributable installer leaves in a game's prefix
+dereferences a null pointer when locking one, so the game died about three
+seconds after the module loaded. 14.40 is the first release that handles it.
+
+Before every launch, `rotk-launcher` reads the version of the prefix's
+`msvcp140.dll` (both `system32` and `syswow64`, two file reads, no network). If
+either is older than 14.40 it installs Microsoft's Visual C++ runtime into the
+prefix, the same thing `winetricks vcrun2022` does, so neither winetricks nor
+protontricks is needed. The installers (`vc_redist.x64.exe` and `.x86.exe`) are
+downloaded once from Microsoft, checked against pinned SHA-256 hashes, and kept
+in `~/.local/share/steam-utility-launcher/VC-Redist/`; a download that doesn't
+match is never run. They are run silently (`/install`, then `/repair` if a file
+is still old, which happens when the bundle is registered but its files were
+replaced). After installing, the version is checked again and the launch stops
+with an error if it is still old. `aka.ms` serves whatever Microsoft currently
+publishes, so when Microsoft updates it the pinned hashes stop matching; update
+them in `vc_runtime.py`.
+
+#### `enable-hwid-access`
+
+Four values (`smbios_uuid`, `baseboard_serial`, `bios_serial`,
+`enclosure_serial`) come from firmware files under `/sys/class/dmi/id` that
+Linux makes root-only. To let your user read them, run once, as yourself:
+
+```bash
+steam-utility-launcher enable-hwid-access
+```
+
+It checks whether they're already readable and does nothing if so. Otherwise it
+prints the small script it will run, asks for confirmation (`-y` skips that),
+and runs it with `sudo python3 -I -B -` piped over stdin: nothing of this tool
+runs as root and no root-owned `.pyc` files are created. The script writes
+`/etc/tmpfiles.d/steam-utility-launcher-hwid.conf` (a `z ... 0444` line per
+file) and applies it immediately with `systemd-tmpfiles`, so it takes effect at
+once (no new shell or logout needed) and again at every boot. Without
+systemd-tmpfiles it changes the permissions directly, which lasts until reboot.
+Every local user can then read those serials, as WMI already allows on Windows.
+Undo it with:
+
+```bash
+steam-utility-launcher enable-hwid-access --disable
+```
+
+Access to those files is required. `rotk-launcher` checks them first, before
+downloading, installing or starting anything, and if any of them exists but
+can't be read by your user it stops with an error telling you to run
+`enable-hwid-access`. It never carries on with an incomplete fingerprint. (A
+file that doesn't exist on your firmware is fine: there is nothing to read.)
+
 ### Manual usage
 
 Run any arbitrary Windows executable inside a game's Proton prefix. The game's

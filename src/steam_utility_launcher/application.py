@@ -9,6 +9,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import hwid_access
 from .steam import Steam
 from .utilities import dsr_gadget, hitman_peacock, rotk_launcher, silky_souls
 
@@ -192,6 +193,24 @@ def _build_parser() -> argparse.ArgumentParser:
             " newer release only triggers a log warning."
         ),
     )
+    hwid_access_parser = subparsers.add_parser(
+        "enable-hwid-access",
+        help=(
+            "Make the firmware serial numbers ROTK's hardware check reads"
+            " readable by your user (one-time; uses sudo)."
+        ),
+    )
+    hwid_access_parser.add_argument(
+        "--disable",
+        action="store_true",
+        help="Undo it: make those files root-only again.",
+    )
+    hwid_access_parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Don't ask for confirmation before running the sudo step.",
+    )
 
     return parser
 
@@ -239,6 +258,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "pid=%s exited with status code %s", child.pid, return_code
             )
             return return_code
+    elif args.mode == "enable-hwid-access":
+        return hwid_access.run(disable=args.disable, assume_yes=args.yes)
     elif args.mode == "prefix-path":
         steam = Steam.from_detection()
         game_id = _resolve_game_id(args)

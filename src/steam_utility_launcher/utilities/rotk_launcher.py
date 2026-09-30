@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from steam_utility_launcher import hwid_access, powershell_log, vc_runtime
 from steam_utility_launcher.github_release_updater import (
     XDG_DATA_ROOT,
     ApplicationUpdater,
@@ -17,6 +18,7 @@ from steam_utility_launcher.github_release_updater import (
     https_get,
 )
 from steam_utility_launcher.steam import Process, Steam
+from steam_utility_launcher.wine_prefix_patches import temporary_wine_patches
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +62,19 @@ def _resolve_app_path(steam: Steam | None) -> tuple[Path | None, Path]:
 
 
 def _run_in_context(
-    steam: Steam | None, prefix: Path | None, command_line: list[str]
+    steam: Steam | None,
+    prefix: Path | None,
+    command_line: list[str],
+    *,
+    disable_powershell: bool = True,
+    extra_env: dict[str, str] | None = None,
 ) -> Process:
     if prefix is not None:
         process = _require_steam(steam).process_in_prefix(
             command_line, game_id=GAME_ID
         )
+        if extra_env and process.env is not None:
+            process.env.update(extra_env)
         # Wine's powershell.exe is an unimplemented stub: it never runs the
         # script it's given and always exits 0. ROTK Launcher's NSIS
         # installer (and its own in-app auto-updater, which invokes the
@@ -79,12 +88,12 @@ def _run_in_context(
         # allowOnlyOneInstallerInstance.nsh template falls back to
         # tasklist/findstr/taskkill whenever PowerShell isn't available.
         # Nothing is written to the prefix.
-        assert process.env is not None  # noqa: S101 - set by process_in_prefix
-        existing = process.env.get("WINEDLLOVERRIDES", "")
-        override = "powershell.exe=d"
-        process.env["WINEDLLOVERRIDES"] = (
-            f"{existing};{override}" if existing else override
-        )
+        if disable_powershell and process.env is not None:
+            existing = process.env.get("WINEDLLOVERRIDES", "")
+            override = "powershell.exe=d"
+            process.env["WINEDLLOVERRIDES"] = (
+                f"{existing};{override}" if existing else override
+            )
         return process
     return Process(command_line)
 
@@ -200,8 +209,46 @@ def _install_if_needed(
 
 def launch(*, steam: Steam | None = None, force: bool = False) -> int:
     prefix, app_path = _resolve_app_path(steam)
+    if prefix is not None:
+        # First, before anything is downloaded, installed or started: if the
+        # hardware check can't be answered completely, don't go on at all.
+        problem = hwid_access.access_problem()
+        if problem is not None:
+            logger.error(problem)
+            return 1
+    ps_log = powershell_log.path() if prefix is not None else None
+    if ps_log is not None:
+        print(
+            f"PowerShell commands the app runs are logged to: {ps_log}",
+            file=sys.stderr,
+        )
     _install_if_needed(
         steam=steam, prefix=prefix, app_path=app_path, force=force
     )
-    child = _run_in_context(steam, prefix, [str(app_path)]).start()
-    return child.wait()
+    if prefix is None or ps_log is None:
+        return _run_in_context(steam, prefix, [str(app_path)]).start().wait()
+    # ROTK's anti-cheat needs a Visual C++ runtime newer than the 2016 one that
+    # Steam's redistributable installer leaves in the game's prefix.
+    vc_runtime.ensure_current(
+        steam=_require_steam(steam), prefix=prefix, game_id=GAME_ID
+    )
+    # The app itself needs a working answer to its hardware fingerprint query
+    # (PowerShell/WMI), which Wine's stub can't give; see wine_prefix_patches.
+    # The PowerShell stand-in also fails every other call, which is what the
+    # app's in-app updater/installer needs, so the override isn't used here.
+    logged_before = powershell_log.size(ps_log)
+    with temporary_wine_patches(prefix):
+        child = _run_in_context(
+            steam,
+            prefix,
+            [str(app_path)],
+            disable_powershell=False,
+            extra_env={
+                powershell_log.ENV_VAR: powershell_log.wine_path(ps_log)
+            },
+        ).start()
+        return_code = child.wait()
+    # The stand-in refuses (and logs) any hardware-ID command it doesn't
+    # recognize; say so here too, where the terminal output is.
+    powershell_log.report_unrecognized(ps_log, logged_before)
+    return return_code
