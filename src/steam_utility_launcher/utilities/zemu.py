@@ -2,9 +2,10 @@
 
 ZEmu is a community server for the 2017 Pre-Season 3 H1Z1 client. Its official
 launcher (ZEmu Launcher, https://zemu.uk) has a native Linux build that
-downloads the game client and starts it through Wine or Proton itself, so this
-only installs and runs that launcher, and points it at a Proton install. The
-launcher is downloaded from ZEmu's own releases when needed, never bundled
+downloads the game client and starts it through Wine or Proton itself, and a
+Windows build. On Linux this installs and runs the AppImage and points it at a
+Proton install; on Windows it installs and runs the official installer's app,
+with nothing to configure. The launcher is downloaded from ZEmu's own releases when needed, never bundled
 here, and none of its code is used: its licence allows using and studying it
 but not redistributing, modifying or deriving from it.
 
@@ -18,8 +19,10 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
 from steam_utility_launcher import minisign, update_check
@@ -40,8 +43,11 @@ logger = logging.getLogger(__name__)
 _REPOSITORY = GitHubRepository(
     "zemu-launcher-releases", organization="Splicho"
 )
-_ASSET_PATTERN = re.compile(
+_LINUX_ASSET_PATTERN = re.compile(
     r"ZEmu\.Launcher_[0-9]+(\.[0-9]+)*_amd64\.AppImage"
+)
+_WINDOWS_ASSET_PATTERN = re.compile(
+    r"ZEmu\.Launcher_[0-9]+(\.[0-9]+)*_x64-setup\.exe"
 )
 _SIGNATURE_SUFFIX = ".sig"
 # ZEmu's updater signing key: the base64 of its minisign public key file, from
@@ -55,6 +61,10 @@ _PUBLIC_KEY = (
 )
 _INSTALL_DIRECTORY_NAME = "ZEmu-Launcher"
 _APPIMAGE_NAME = "ZEmu-Launcher.AppImage"
+# Windows: the installer is told to put the app here, inside the install
+# directory, so that it is always found in the same place.
+_WINDOWS_APP_DIRECTORY_NAME = "app"
+_WINDOWS_UNINSTALLER_NAME = "uninstall.exe"
 # Where ZEmu Launcher keeps its settings (its Tauri app identifier).
 _APP_IDENTIFIER = "uk.zemu.launcher"
 _CONFIG_FILE_NAME = "launcher-config.json"
@@ -73,8 +83,38 @@ class InstallError(RuntimeError):
     """ZEmu Launcher couldn't be obtained or verified."""
 
 
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _asset_pattern() -> re.Pattern[str]:
+    return _WINDOWS_ASSET_PATTERN if _is_windows() else _LINUX_ASSET_PATTERN
+
+
 def install_directory() -> Path:
     return XDG_DATA_ROOT / _INSTALL_DIRECTORY_NAME
+
+
+def windows_app_directory() -> Path:
+    return install_directory() / _WINDOWS_APP_DIRECTORY_NAME
+
+
+def installed_executable() -> Path | None:
+    """The installed launcher, or None if it isn't installed."""
+    if not _is_windows():
+        appimage = install_directory() / _APPIMAGE_NAME
+        return appimage if appimage.is_file() else None
+    directory = windows_app_directory()
+    if not directory.is_dir():
+        return None
+    # The app's own file name isn't assumed: it is the one program there
+    # besides the uninstaller.
+    candidates = [
+        entry
+        for entry in directory.glob("*.exe")
+        if entry.name.lower() != _WINDOWS_UNINSTALLER_NAME
+    ]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def app_data_directory() -> Path:
@@ -113,7 +153,9 @@ def _get(url: str) -> bytes:
     return body
 
 
-def _install(release: Release, asset: Path, *, public_key: str) -> None:
+def _download_verified(
+    release: Release, asset: Path, *, public_key: str
+) -> bytes:
     sig_asset = Path(asset.name + _SIGNATURE_SUFFIX)
     if sig_asset not in release.asset_urls:
         msg = f"Release {release.tag} has no signature for {asset.name}."
@@ -123,15 +165,45 @@ def _install(release: Release, asset: Path, *, public_key: str) -> None:
     signature_text = _get(release.asset_urls[sig_asset]).decode(
         "utf-8", errors="replace"
     )
-    # Verified before anything is written, let alone made executable.
+    # Verified before anything is written, let alone made executable or run.
     _verify(content, signature_text, asset.name, public_key)
+    return content
+
+
+def _run_windows_installer(installer: Path, target: Path) -> int:
+    # NSIS wants /D= last and unquoted even when the path has spaces, which a
+    # list of arguments can't express, so the command line is built as text.
+    command_line = f'"{installer}" /S /D={target}'
+    return subprocess.run(command_line, check=False).returncode  # noqa: S603
+
+
+def _install(release: Release, asset: Path, *, public_key: str) -> None:
+    content = _download_verified(release, asset, public_key=public_key)
     directory = install_directory()
     directory.mkdir(parents=True, exist_ok=True)
-    target = directory / _APPIMAGE_NAME
-    staging = target.with_suffix(".part")
-    staging.write_bytes(content)
-    staging.chmod(0o755)
-    staging.replace(target)
+    if _is_windows():
+        target = windows_app_directory()
+        with TemporaryDirectory() as staging_dir:
+            installer = Path(staging_dir) / asset.name
+            installer.write_bytes(content)
+            return_code = _run_windows_installer(installer, target)
+        if return_code != 0:
+            msg = (
+                f"The ZEmu Launcher installer exited with status {return_code}"
+            )
+            raise InstallError(msg)
+        if installed_executable() is None:
+            msg = (
+                f"ZEmu Launcher's app wasn't found in {target} after"
+                " installing."
+            )
+            raise InstallError(msg)
+    else:
+        target = directory / _APPIMAGE_NAME
+        staging = target.with_suffix(".part")
+        staging.write_bytes(content)
+        staging.chmod(0o755)
+        staging.replace(target)
     (directory / ApplicationUpdater.TAG_FILE_NAME).write_text(release.tag)
     logger.info('Installed ZEmu Launcher "%s".', release.tag)
 
@@ -139,10 +211,9 @@ def _install(release: Release, asset: Path, *, public_key: str) -> None:
 def _install_if_needed(*, force: bool) -> None:
     directory = install_directory()
     directory.mkdir(parents=True, exist_ok=True)
-    appimage = directory / _APPIMAGE_NAME
     tag_file = directory / ApplicationUpdater.TAG_FILE_NAME
     installed_tag = tag_file.read_text().strip() if tag_file.exists() else ""
-    already_installed = appimage.exists()
+    already_installed = installed_executable() is not None
     marker = directory / update_check.MARKER_FILE_NAME
     if (
         already_installed
@@ -156,11 +227,12 @@ def _install_if_needed(*, force: bool) -> None:
         msg = f"No release found for {_REPOSITORY}"
         raise InstallError(msg)
     update_check.record_checked_now(marker)
-    asset = release.single_matching_asset(_ASSET_PATTERN)
+    pattern = _asset_pattern()
+    asset = release.single_matching_asset(pattern)
     if not asset:
         msg = (
-            f"Release {release.tag} has no AppImage matching"
-            f" {_ASSET_PATTERN.pattern!r}"
+            f"Release {release.tag} has no ZEmu Launcher download matching"
+            f" {pattern.pattern!r}"
         )
         raise InstallError(msg)
     if already_installed and installed_tag != release.tag:
@@ -295,11 +367,8 @@ def launch(
     configure: bool = True,
     proton: Path | None = None,
 ) -> int:
-    if not sys.platform.startswith("linux"):
-        logger.error(
-            "The zemu command only supports Linux; on Windows, install ZEmu"
-            " Launcher from https://zemu.uk."
-        )
+    if not (_is_windows() or sys.platform.startswith("linux")):
+        logger.error("The zemu command only supports Linux and Windows.")
         return 1
     print(
         "Starting ZEmu Launcher (https://zemu.uk). Unofficial wrapper; not"
@@ -313,7 +382,7 @@ def launch(
         logger.error("%s", error)  # noqa: TRY400
         return 1
 
-    if configure:
+    if configure and not _is_windows():
         proton_binary = pick_proton(steam, proton) if steam else None
         if proton_binary is None:
             logger.warning(
@@ -325,10 +394,14 @@ def launch(
                 app_data_directory() / _CONFIG_FILE_NAME, proton_binary
             )
 
-    directory = install_directory()
+    executable = installed_executable()
+    if executable is None:
+        logger.error("ZEmu Launcher isn't installed; try --force.")
+        return 1
+    if _is_windows():
+        # Natively on Windows: no Proton to set up, and no environment to fix.
+        return Process([str(executable)], cwd=executable.parent).start().wait()
     child = Process(
-        [str(directory / _APPIMAGE_NAME)],
-        env=launch_environment(),
-        cwd=directory,
+        [str(executable)], env=launch_environment(), cwd=install_directory()
     ).start()
     return child.wait()

@@ -193,7 +193,8 @@ file that doesn't exist on your firmware is fine: there is nothing to read.)
 ### ZEmu: King of the Kill
 
 [ZEmu](https://zemu.uk) is a community server for the 2017 Pre-Season 3 H1Z1
-client. Install and run its official launcher, pointed at your Proton:
+client. Install and run its official launcher (on Linux, pointed at your
+Proton):
 
 ```bash
 steam-utility-launcher zemu
@@ -202,7 +203,8 @@ steam-utility-launcher zemu
 Unlike ROTK Launcher, ZEmu Launcher has a native Linux build with Wine/Proton
 support of its own. It downloads the game client (it uses the same Steam app as
 Z1 Battle Royale, 433850, at an older version, so you sign in to Steam in its
-window) and starts it through Proton itself. This command therefore just:
+window) and starts it through Proton itself. On Linux this command therefore
+just:
 
 1. Downloads the latest ZEmu Launcher AppImage from ZEmu's own releases the
    first time, and **verifies its signature** (ZEmu signs releases with a
@@ -218,8 +220,15 @@ window) and starts it through Proton itself. This command therefore just:
    workaround for NVIDIA) unless you've set it, and `APPIMAGE_EXTRACT_AND_RUN=1`
    if FUSE 2 isn't installed.
 
-**Requirements:** the AppImage needs FUSE 2 (`libfuse.so.2`) to run directly,
-which many distributions no longer install by default: `fuse2` on Arch,
+**On Windows,** the same command downloads ZEmu's Windows installer, verifies
+its signature against the same pinned key, installs it silently into this
+tool's own folder (`ZEmu-Launcher\app` under the tool's data directory) and
+runs it. There's no Proton, FUSE or settings step, and ZEmu Launcher starts the
+game itself. This path has only been tested with unit tests, not on a real
+Windows machine.
+
+**Requirements (Linux):** the AppImage needs FUSE 2 (`libfuse.so.2`) to run
+directly, which many distributions no longer install by default: `fuse2` on Arch,
 `libfuse2` (`libfuse2t64` on newer Ubuntu) on Debian/Ubuntu, `fuse-libs` on
 Fedora. Without it the tool falls back to extracting the AppImage on every
 launch (`APPIMAGE_EXTRACT_AND_RUN=1`), which works but starts slower, so
