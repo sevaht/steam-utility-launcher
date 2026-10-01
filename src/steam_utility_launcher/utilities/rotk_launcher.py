@@ -5,11 +5,15 @@ import logging
 import os
 import re
 import sys
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from steam_utility_launcher import hwid_access, powershell_log, vc_runtime
+from steam_utility_launcher import (
+    hwid_access,
+    powershell_log,
+    update_check,
+    vc_runtime,
+)
 from steam_utility_launcher.github_release_updater import (
     XDG_DATA_ROOT,
     ApplicationUpdater,
@@ -27,22 +31,6 @@ GAME_ID = "433850"
 _ASSET_PATTERN = re.compile(r"ROTK-Launcher-[0-9]+(\.[0-9]+)*-x64\.exe")
 _CHECKSUMS_ASSET_NAME = Path("SHA256SUMS.txt")
 _CHECKSUM_LINE_PART_COUNT = 2
-_LAST_CHECKED_FILE_NAME = ".last_update_check"
-_UPDATE_CHECK_INTERVAL = timedelta(days=1)
-
-
-def _checked_recently(marker: Path) -> bool:
-    if not marker.exists():
-        return False
-    try:
-        last_checked = datetime.fromisoformat(marker.read_text().strip())
-    except ValueError:
-        return False
-    return datetime.now(UTC) - last_checked < _UPDATE_CHECK_INTERVAL
-
-
-def _record_checked_now(marker: Path) -> None:
-    marker.write_text(datetime.now(UTC).isoformat())
 
 
 def _require_steam(steam: Steam | None) -> Steam:
@@ -165,16 +153,16 @@ def _install_if_needed(
     installed_tag = tag_file.read_text().strip() if tag_file.exists() else ""
     already_installed = app_path.exists()
 
-    last_checked_file = install_directory / _LAST_CHECKED_FILE_NAME
+    last_checked_file = install_directory / update_check.MARKER_FILE_NAME
     if (
         already_installed
         and not force
-        and _checked_recently(last_checked_file)
+        and update_check.checked_recently(last_checked_file)
     ):
         return
 
     release, asset_name = _fetch_release_and_asset()
-    _record_checked_now(last_checked_file)
+    update_check.record_checked_now(last_checked_file)
     update_available = already_installed and installed_tag != release.tag
 
     if update_available:

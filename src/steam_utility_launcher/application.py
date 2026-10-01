@@ -11,7 +11,13 @@ from typing import TYPE_CHECKING
 
 from . import hwid_access
 from .steam import Steam
-from .utilities import dsr_gadget, hitman_peacock, rotk_launcher, silky_souls
+from .utilities import (
+    dsr_gadget,
+    hitman_peacock,
+    rotk_launcher,
+    silky_souls,
+    zemu,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -193,6 +199,40 @@ def _build_parser() -> argparse.ArgumentParser:
             " newer release only triggers a log warning."
         ),
     )
+    zemu_parser = subparsers.add_parser(
+        "zemu",
+        help=(
+            "Install and run ZEmu Launcher (https://zemu.uk) for H1Z1: King of"
+            " the Kill, pointed at your Proton."
+        ),
+    )
+    zemu_parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Install the latest ZEmu Launcher release even if one is already"
+            " installed. Without this, an existing installation is left as-is"
+            " (ZEmu Launcher updates itself once running); a newer release"
+            " only triggers a log warning."
+        ),
+    )
+    zemu_parser.add_argument(
+        "--no-configure",
+        action="store_true",
+        help=(
+            "Don't touch ZEmu Launcher's settings; choose the Wine/Proton"
+            " runtime in its own Properties screen instead."
+        ),
+    )
+    zemu_parser.add_argument(
+        "--proton",
+        metavar="PATH",
+        help=(
+            "The Proton to use (its folder or its `proton` script). Defaults"
+            " to the one Steam uses for Z1 Battle Royale, else the newest"
+            " stable one installed."
+        ),
+    )
     hwid_access_parser = subparsers.add_parser(
         "enable-hwid-access",
         help=(
@@ -215,7 +255,14 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _launch_preset(mode: str, steam: Steam | None, *, force: bool) -> int:
+def _launch_preset(
+    mode: str,
+    steam: Steam | None,
+    *,
+    force: bool,
+    configure: bool = True,
+    proton: Path | None = None,
+) -> int:
     if mode == "hitman-peacock":
         return hitman_peacock.launch(steam=steam)
     if mode == "dsr-gadget":
@@ -224,6 +271,10 @@ def _launch_preset(mode: str, steam: Steam | None, *, force: bool) -> int:
         return silky_souls.launch(steam=steam)
     if mode == "rotk-launcher":
         return rotk_launcher.launch(steam=steam, force=force)
+    if mode == "zemu":
+        return zemu.launch(
+            steam=steam, force=force, configure=configure, proton=proton
+        )
     raise NotImplementedError
 
 
@@ -269,10 +320,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dsr-gadget",
         "silky-souls",
         "rotk-launcher",
+        "zemu",
     }:
         if sys.platform == "linux":
             steam = Steam.from_detection()
+        proton = getattr(args, "proton", None)
         return _launch_preset(
-            args.mode, steam, force=getattr(args, "force", False)
+            args.mode,
+            steam,
+            force=getattr(args, "force", False),
+            configure=not getattr(args, "no_configure", False),
+            proton=Path(proton) if proton else None,
         )
     return 0

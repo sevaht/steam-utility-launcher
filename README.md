@@ -190,6 +190,56 @@ can't be read by your user it stops with an error telling you to run
 `enable-hwid-access`. It never carries on with an incomplete fingerprint. (A
 file that doesn't exist on your firmware is fine: there is nothing to read.)
 
+### ZEmu: King of the Kill
+
+[ZEmu](https://zemu.uk) is a community server for the 2017 Pre-Season 3 H1Z1
+client. Install and run its official launcher, pointed at your Proton:
+
+```bash
+steam-utility-launcher zemu
+```
+
+Unlike ROTK Launcher, ZEmu Launcher has a native Linux build with Wine/Proton
+support of its own. It downloads the game client (it uses the same Steam app as
+Z1 Battle Royale, 433850, at an older version, so you sign in to Steam in its
+window) and starts it through Proton itself. This command therefore just:
+
+1. Downloads the latest ZEmu Launcher AppImage from ZEmu's own releases the
+   first time, and **verifies its signature** (ZEmu signs releases with a
+   minisign key, which is pinned in the tool) before installing or running
+   anything. A file that fails verification is never written to disk.
+2. Points ZEmu Launcher at a Proton install in its own settings file, **only
+   filling in what you haven't set yourself**: it prefers the Proton Steam uses
+   for Z1 Battle Royale, else the newest stable one, or pass `--proton PATH`. A
+   runtime you chose in ZEmu's Properties screen is never replaced, nothing else
+   in the file is touched, and ZEmu keeps its own dedicated prefix, separate
+   from your Z1/ROTK one. `--no-configure` skips this step.
+3. Runs it, with `WEBKIT_DISABLE_DMABUF_RENDERER=1` set (a blank-window
+   workaround for NVIDIA) unless you've set it, and `APPIMAGE_EXTRACT_AND_RUN=1`
+   if FUSE 2 isn't installed.
+
+**Requirements:** the AppImage needs FUSE 2 (`libfuse.so.2`) to run directly,
+which many distributions no longer install by default: `fuse2` on Arch,
+`libfuse2` (`libfuse2t64` on newer Ubuntu) on Debian/Ubuntu, `fuse-libs` on
+Fedora. Without it the tool falls back to extracting the AppImage on every
+launch (`APPIMAGE_EXTRACT_AND_RUN=1`), which works but starts slower, so
+installing it is recommended. You also need Steam with a Proton install and a
+Vulkan-capable graphics driver; nothing else outside this project is required.
+
+Like `rotk-launcher`, an existing install isn't updated by this command, because
+ZEmu Launcher updates itself once it's running. A newer release is only
+mentioned, at most once a day; `--force` installs the latest right away.
+
+None of ROTK's workarounds (the PowerShell stand-in, `enable-hwid-access`, the
+Visual C++ runtime step) are applied, since ZEmu's launcher doesn't need them
+for itself. Whether the game client needs anything extra under Proton is
+untested.
+
+This tool is not affiliated with ZEmu. ZEmu Launcher's licence lets you use and
+study it but not redistribute or modify it, so it is downloaded from ZEmu's
+releases when you run this and is never bundled here, and none of its code is
+used. ZEmu Launcher — https://zemu.uk
+
 ### Manual usage
 
 Run any arbitrary Windows executable inside a game's Proton prefix. The game's
