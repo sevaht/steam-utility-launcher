@@ -21,11 +21,13 @@
  * Every invocation is appended to a log (SUL_POWERSHELL_LOG, else
  * %TEMP%\sul-powershell-commands.log) with its verdict:
  *
- *   answered           the exact fingerprint query above; only slot names are
- *                      logged, never the hardware values.
+ *   answered           the exact fingerprint query above (only slot names are
+ *                      logged, never the hardware values), or one of the
+ *                      installer's "is the app running / close it" one-liners
+ *                      (see answer_instance_check), which are answered for real.
  *   declined           anything else: exit 1 with no output, exactly as a
- *                      missing PowerShell would (the app's installer/updater,
- *                      TPM and diagnostics code all rely on that).
+ *                      missing PowerShell would (the app's TPM and diagnostics
+ *                      code rely on that).
  *   HWID-UNRECOGNIZED  a command that references hardware-identifier data
  *                      (the WMI classes and registry value the fingerprint
  *                      reads) but does not match exactly. It is refused, and
@@ -43,6 +45,7 @@
 #define _WIN32_WINNT 0x0600
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <tlhelp32.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -736,6 +739,149 @@ static int answer_hwid(char *script, char *answered, size_t acap, char *unreadab
     return 1;
 }
 
+/* ------------------------- the installer's "is the app running?" one-liners */
+
+/* ROTK Launcher's NSIS installer (electron-builder's template, which is also
+ * what the in-app updater runs) decides whether the app is still running, and
+ * closes it, with four fixed PowerShell one-liners; <P> is the install
+ * directory:
+ *
+ *   if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }
+ *   if ((Get-ExecutionPolicy -Scope Process) -eq 'Restricted') { exit 1 } else { exit 0 }
+ *   if ((Get-CimInstance -ClassName Win32_Process | ? {$_.Path -and $_.Path.StartsWith('<P>', 'CurrentCultureIgnoreCase')}).Count -gt 0) { exit 0 } else { exit 1 }
+ *   Get-CimInstance -ClassName Win32_Process | ? {$_.Path -and $_.Path.StartsWith('<P>', 'CurrentCultureIgnoreCase')} | % { Stop-Process -Id $_.ProcessId [-Force] }
+ *
+ * Wine has no PowerShell, so a stand-in that just failed them would leave the
+ * installer unable to tell whether the app is running (it then reports that the
+ * app "cannot be closed"). They are answered here for real: the scan is done
+ * with Win32 process enumeration, and Stop-Process terminates what it matched.
+ * As with the fingerprint query, the whole command must match one of these
+ * shapes (whitespace aside); the only free part is <P>. */
+
+typedef enum {
+    CHECK_NONE,
+    CHECK_CIM_AVAILABLE,
+    CHECK_POLICY_OPEN,
+    CHECK_RUNNING,
+    CHECK_STOP,
+} check_kind;
+
+#define SCAN_HEAD "Get-CimInstance -ClassName Win32_Process | ? {$_.Path -and $_.Path.StartsWith('"
+#define SCAN_TAIL "', 'CurrentCultureIgnoreCase')}"
+
+static void collapse_whitespace(char *s) {
+    char *w = s;
+    int pending = 0;
+    for (char *r = s; *r; r++) {
+        if (*r == ' ' || *r == '\t' || *r == '\r' || *r == '\n') { pending = 1; continue; }
+        if (pending && w != s) *w++ = ' ';
+        pending = 0;
+        *w++ = *r;
+    }
+    *w = 0;
+}
+
+static int starts_with(const char *s, const char *prefix) {
+    return strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
+/* If `text` is `head <P> tail`, copies <P> into `out` (a path never contains a
+ * single quote, which would end the PowerShell string early) and returns 1. */
+static int match_template(const char *text, const char *head, const char *tail,
+                          char *out, size_t cap) {
+    size_t hl = strlen(head), tl = strlen(tail), n = strlen(text);
+    size_t mid;
+    if (n < hl + tl + 1 || !starts_with(text, head) || strcmp(text + n - tl, tail) != 0) return 0;
+    mid = n - hl - tl;
+    if (mid >= cap || memchr(text + hl, '\'', mid)) return 0;
+    memcpy(out, text + hl, mid);
+    out[mid] = 0;
+    return 1;
+}
+
+static check_kind classify_check(const char *text, char *prefix, size_t cap) {
+    if (strcmp(text, "if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }") == 0)
+        return CHECK_CIM_AVAILABLE;
+    if (strcmp(text, "if ((Get-ExecutionPolicy -Scope Process) -eq 'Restricted') { exit 1 } else { exit 0 }") == 0)
+        return CHECK_POLICY_OPEN;
+    if (match_template(text, "if ((" SCAN_HEAD, SCAN_TAIL ").Count -gt 0) { exit 0 } else { exit 1 }",
+                       prefix, cap))
+        return CHECK_RUNNING;
+    if (match_template(text, SCAN_HEAD, SCAN_TAIL " | % { Stop-Process -Id $_.ProcessId }", prefix, cap) ||
+        match_template(text, SCAN_HEAD, SCAN_TAIL " | % { Stop-Process -Id $_.ProcessId -Force }",
+                       prefix, cap))
+        return CHECK_STOP;
+    return CHECK_NONE;
+}
+
+/* How many other processes run from a path starting with `prefix` (compared
+ * case-insensitively, as the one-liner does); terminates them if asked. */
+static int scan_processes(const char *prefix, int terminate) {
+    wchar_t wide[PATH_CAP];
+    size_t len;
+    int matches = 0;
+    DWORD self = GetCurrentProcessId();
+    PROCESSENTRY32W entry;
+    HANDLE snapshot;
+    if (MultiByteToWideChar(CP_UTF8, 0, prefix, -1, wide, PATH_CAP) <= 0) return 0;
+    len = wcslen(wide);
+    snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    entry.dwSize = sizeof entry;
+    for (BOOL more = Process32FirstW(snapshot, &entry); more; more = Process32NextW(snapshot, &entry)) {
+        wchar_t path[PATH_CAP];
+        DWORD size = PATH_CAP;
+        HANDLE process;
+        if (entry.th32ProcessID == 0 || entry.th32ProcessID == self) continue;
+        process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | (terminate ? PROCESS_TERMINATE : 0),
+                              FALSE, entry.th32ProcessID);
+        if (!process) continue;
+        if (QueryFullProcessImageNameW(process, 0, path, &size) && _wcsnicmp(path, wide, len) == 0) {
+            matches++;
+            if (terminate) TerminateProcess(process, 1);
+        }
+        CloseHandle(process);
+    }
+    CloseHandle(snapshot);
+    return matches;
+}
+
+/* Answers one of the installer's one-liners. Returns its exit code, or -1 if
+ * `command` is not one of them (nothing is logged or done then). */
+static int answer_instance_check(const char *cmdline, const char *command) {
+    char *text = _strdup(command);
+    char prefix[PATH_CAP] = "";
+    char note[PATH_CAP + 128];
+    check_kind kind;
+    int code = 0, matches = 0;
+    if (!text) return -1;
+    collapse_whitespace(text);
+    kind = classify_check(text, prefix, sizeof prefix);
+    free(text);
+    switch (kind) {
+    case CHECK_NONE: return -1;
+    case CHECK_CIM_AVAILABLE:
+        snprintf(note, sizeof note, "installer check: Get-CimInstance is available -> exit 0");
+        break;
+    case CHECK_POLICY_OPEN:
+        snprintf(note, sizeof note, "installer check: execution policy is not Restricted -> exit 0");
+        break;
+    case CHECK_RUNNING:
+        matches = scan_processes(prefix, 0);
+        code = matches > 0 ? 0 : 1;
+        snprintf(note, sizeof note, "installer check: %d process(es) running from: %s -> exit %d",
+                 matches, prefix, code);
+        break;
+    case CHECK_STOP:
+        matches = scan_processes(prefix, 1);
+        snprintf(note, sizeof note, "installer check: stopped %d process(es) running from: %s",
+                 matches, prefix);
+        break;
+    }
+    log_command("answered", cmdline, command, note);
+    return code;
+}
+
 int wmain(int argc, wchar_t **argv) {
     const wchar_t *command_line;
     char *cmdline, *text;
@@ -749,6 +895,15 @@ int wmain(int argc, wchar_t **argv) {
     if (!cmdline) return EXIT_DECLINED;
     utf8_from_wide(command_line, cmdline, (int)(wcslen(command_line) * 4 + 8));
     text = command_text(argc, argv, &encoded);
+
+    if (text && !encoded) {
+        int code = answer_instance_check(cmdline, text);
+        if (code >= 0) {
+            free(text);
+            free(cmdline);
+            return code;
+        }
+    }
 
     if (text && encoded) {
         char answered[2048] = "", unreadable[2048] = "", no_reader[2048] = "";

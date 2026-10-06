@@ -93,12 +93,18 @@ and every other prefix and process are untouched.
 
 **Hardware ID (`hwid_required`).** ROTK's account service now refuses launches
 that carry no hardware fingerprint, and the app collects it by running
-PowerShell/WMI queries, which Wine's stub can't answer. While the app runs,
-this tool therefore replaces the prefix's `powershell.exe` (both `system32`
-and `syswow64`, each with its own architecture's build) with a small native
-Windows program (`resources/wine_powershell_hwid.c`, prebuilt by
-`build-powershell-hwid`) and puts the original back when the app exits. It
-must be a real `.exe`: Wine can't connect a Windows process's pipes to a
+PowerShell/WMI queries, which Wine's stub can't answer. This tool therefore
+replaces the prefix's `powershell.exe` (both `system32` and `syswow64`, each
+with its own architecture's build) with a small native Windows program
+(`resources/wine_powershell_hwid.c`, prebuilt by `build-powershell-hwid`).
+It is left in place permanently: every `rotk-launcher` run checks that it is
+present and current and reinstalls it if it's missing or differs (for
+example after a prefix reset or a new build), and never takes it back out.
+It can't be removed after the launch, because ROTK Launcher 2.0.29 and later
+carries on in another process a few seconds after the one we start exits,
+and its in-app updater runs an installer after the app has quit. Wine's own
+stub is only a symlink into the Proton installation, which is not touched.
+It must be a real `.exe`: Wine can't connect a Windows process's pipes to a
 native Unix program, and spawning one that way crashes the launcher.
 
 The stand-in never executes the script it is given, and it only answers the

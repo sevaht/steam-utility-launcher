@@ -22,7 +22,7 @@ from steam_utility_launcher.github_release_updater import (
     https_get,
 )
 from steam_utility_launcher.steam import Process, Steam
-from steam_utility_launcher.wine_prefix_patches import temporary_wine_patches
+from steam_utility_launcher.wine_prefix_patches import ensure_wine_patches
 
 logger = logging.getLogger(__name__)
 
@@ -222,20 +222,20 @@ def launch(*, steam: Steam | None = None, force: bool = False) -> int:
     )
     # The app itself needs a working answer to its hardware fingerprint query
     # (PowerShell/WMI), which Wine's stub can't give; see wine_prefix_patches.
-    # The PowerShell stand-in also fails every other call, which is what the
-    # app's in-app updater/installer needs, so the override isn't used here.
+    # The stand-in is left in the prefix for good (see there), so this only
+    # has to confirm on each launch that it is still present and current. It
+    # also answers the installer checks the app's in-app updater makes, so
+    # the DLL override that disables PowerShell isn't used here.
+    ensure_wine_patches(prefix)
     logged_before = powershell_log.size(ps_log)
-    with temporary_wine_patches(prefix):
-        child = _run_in_context(
-            steam,
-            prefix,
-            [str(app_path)],
-            disable_powershell=False,
-            extra_env={
-                powershell_log.ENV_VAR: powershell_log.wine_path(ps_log)
-            },
-        ).start()
-        return_code = child.wait()
+    child = _run_in_context(
+        steam,
+        prefix,
+        [str(app_path)],
+        disable_powershell=False,
+        extra_env={powershell_log.ENV_VAR: powershell_log.wine_path(ps_log)},
+    ).start()
+    return_code = child.wait()
     # The stand-in refuses (and logs) any hardware-ID command it doesn't
     # recognize; say so here too, where the terminal output is.
     powershell_log.report_unrecognized(ps_log, logged_before)

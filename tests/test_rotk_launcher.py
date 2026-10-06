@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
@@ -9,7 +8,6 @@ from steam_utility_launcher import hwid_access, powershell_log, vc_runtime
 from steam_utility_launcher.utilities import rotk_launcher
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -44,11 +42,7 @@ def _wire(
     monkeypatch.setattr(vc_runtime, "ensure_current", lambda **_: None)
     monkeypatch.setattr(hwid_access, "access_problem", lambda: None)
 
-    @contextmanager
-    def no_patches(_prefix: Path) -> Iterator[None]:
-        yield
-
-    monkeypatch.setattr(rotk_launcher, "temporary_wine_patches", no_patches)
+    monkeypatch.setattr(rotk_launcher, "ensure_wine_patches", lambda _p: None)
 
     def fake_run(
         _steam: object, _prefix: object, _command: list[str], **kwargs: object
@@ -79,7 +73,7 @@ def test_launch_refuses_to_do_anything_if_the_hardware_files_are_unreadable(
     monkeypatch.setattr(rotk_launcher, "_install_if_needed", must_not_run)
     monkeypatch.setattr(vc_runtime, "ensure_current", must_not_run)
     monkeypatch.setattr(rotk_launcher, "_run_in_context", must_not_run)
-    monkeypatch.setattr(rotk_launcher, "temporary_wine_patches", must_not_run)
+    monkeypatch.setattr(rotk_launcher, "ensure_wine_patches", must_not_run)
     with caplog.at_level("ERROR"):
         assert rotk_launcher.launch(steam=object()) == 1  # type: ignore[arg-type]
     assert "Refusing to start" in caplog.text
@@ -130,3 +124,25 @@ def test_older_refusals_are_not_repeated(
     with caplog.at_level("ERROR"):
         rotk_launcher.launch(steam=object())  # type: ignore[arg-type]
     assert not caplog.records
+
+
+def test_stand_in_is_confirmed_before_the_app_starts_and_left_in_place(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _wire(monkeypatch, tmp_path, "")
+    events: list[str] = []
+    ensured: list[Path] = []
+
+    def ensure(prefix: Path) -> None:
+        ensured.append(prefix)
+        events.append("ensure")
+
+    def run(*_a: object, **_k: object) -> _FakeProcess:
+        events.append("start")
+        return _FakeProcess("")
+
+    monkeypatch.setattr(rotk_launcher, "ensure_wine_patches", ensure)
+    monkeypatch.setattr(rotk_launcher, "_run_in_context", run)
+    rotk_launcher.launch(steam=object())  # type: ignore[arg-type]
+    assert events == ["ensure", "start"]  # nothing is undone afterward
+    assert ensured == [tmp_path / "pfx"]
