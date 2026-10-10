@@ -3,11 +3,15 @@
 Run by the unprivileged tool as `sudo python3 -I -B - <enable|disable>` with
 this text on stdin, so that nothing of the tool is ever imported by, or
 written (.pyc files) as, root. It touches nothing but the fixed list of files
-below and one systemd-tmpfiles drop-in, and accepts no paths from anyone.
+below, one systemd-tmpfiles drop-in and one udev rule, and accepts no paths
+from anyone.
 
   enable   make the DMI serial/UUID files readable by every local user, now
-           and on every boot (via a tmpfiles.d rule)
-  disable  remove that rule and make the files root-only again
+           and on every boot (via a tmpfiles.d rule), and let the logged-in
+           desktop user use the TPM's kernel resource manager (/dev/tpmrm*)
+           via a udev "uaccess" rule, as the ROTK launcher's TPM attestation
+           does on Windows
+  disable  remove both rules and make everything root-only again
 
 Standard library only.
 """
@@ -26,6 +30,18 @@ from pathlib import Path
 _DMI_DIR = Path("/sys/class/dmi/id")
 _FILES = ("product_uuid", "product_serial", "board_serial", "chassis_serial")
 _CONF = Path("/etc/tmpfiles.d/steam-utility-launcher-hwid.conf")
+# The TPM resource manager devices; keep in sync with hwid_access.py.
+_TPM_DEVICES = "/dev/tpmrm[0-9]*"
+# Before 73-seat-late.rules, which is what turns the tag into an ACL.
+_TPM_RULE = Path("/etc/udev/rules.d/70-steam-utility-launcher-tpm.rules")
+_TPM_RULE_LINES = (
+    "# Managed by steam-utility-launcher (enable-hwid-access).",
+    "# Lets the logged-in desktop user use the TPM through the kernel resource",
+    "# manager, as the ROTK launcher does on Windows. Remove with",
+    "# `steam-utility-launcher enable-hwid-access --disable`.",
+    'KERNEL=="tpmrm[0-9]*", SUBSYSTEM=="tpmrm", TAG+="uaccess"',
+    "",
+)
 _ROOT_ONLY = 0o400
 _WORLD_READABLE = 0o444
 _ARGC = 2  # program name and the action
@@ -35,30 +51,56 @@ def _existing() -> list[Path]:
     return [_DMI_DIR / name for name in _FILES if (_DMI_DIR / name).exists()]
 
 
-def _write_conf(paths: list[Path]) -> None:
-    lines = [
-        "# Managed by steam-utility-launcher (enable-hwid-access).",
-        "# Makes firmware serial numbers readable to local users, as WMI does",
-        "# on Windows. Remove with `steam-utility-launcher enable-hwid-access"
-        " --disable`.",
-        *(f"z {path} {_WORLD_READABLE:04o} - - -" for path in paths),
-        "",
-    ]
-    _CONF.parent.mkdir(parents=True, exist_ok=True)
+def _tpm_present() -> bool:
+    return any(Path("/dev").glob(_TPM_DEVICES.removeprefix("/dev/")))
+
+
+def _write_atomically(
+    target: Path, lines: list[str] | tuple[str, ...]
+) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
     # Atomic replace, so a crash never leaves a half-written rule.
     with tempfile.NamedTemporaryFile(
-        "w", dir=_CONF.parent, delete=False, encoding="utf-8"
+        "w", dir=target.parent, delete=False, encoding="utf-8"
     ) as staged:
         staged.write("\n".join(lines))
     Path(staged.name).chmod(0o644)
-    Path(staged.name).replace(_CONF)
+    Path(staged.name).replace(target)
 
 
-def _enable() -> int:
+def _reload_udev() -> None:
+    udevadm = shutil.which("udevadm")
+    if not udevadm:
+        print("udevadm not found; the TPM rule applies at the next boot.")
+        return
+    for args in (
+        ["control", "--reload"],
+        ["trigger", "--action=change", "--subsystem-match=tpmrm"],
+        ["settle"],
+    ):
+        subprocess.run([udevadm, *args], check=False)  # noqa: S603
+
+
+def _write_conf(paths: list[Path]) -> None:
+    _write_atomically(
+        _CONF,
+        [
+            "# Managed by steam-utility-launcher (enable-hwid-access).",
+            "# Makes firmware serial numbers readable to local users, as WMI"
+            " does",
+            "# on Windows. Remove with `steam-utility-launcher"
+            " enable-hwid-access --disable`.",
+            *(f"z {path} {_WORLD_READABLE:04o} - - -" for path in paths),
+            "",
+        ],
+    )
+
+
+def _enable_dmi() -> None:
     paths = _existing()
     if not paths:
         print("No DMI serial files exist on this machine; nothing to do.")
-        return 0
+        return
     _write_conf(paths)
     print(f"Wrote {_CONF}")
     tmpfiles = shutil.which("systemd-tmpfiles")
@@ -68,7 +110,7 @@ def _enable() -> int:
         )
         if result.returncode == 0:
             print("Applied now; it will also be re-applied at every boot.")
-            return 0
+            return
         print("systemd-tmpfiles failed; changing permissions directly.")
     else:
         print(
@@ -77,6 +119,21 @@ def _enable() -> int:
         )
     for path in paths:
         path.chmod(_WORLD_READABLE)
+
+
+def _enable_tpm() -> None:
+    if not _tpm_present():
+        print("No TPM resource manager device on this machine; skipping it.")
+        return
+    _write_atomically(_TPM_RULE, _TPM_RULE_LINES)
+    print(f"Wrote {_TPM_RULE}")
+    _reload_udev()
+    print("The TPM is usable by the logged-in desktop user.")
+
+
+def _enable() -> int:
+    _enable_dmi()
+    _enable_tpm()
     return 0
 
 
@@ -86,6 +143,10 @@ def _disable() -> int:
     for path in _existing():
         path.chmod(_ROOT_ONLY)
     print("DMI serial files are root-only again.")
+    if _TPM_RULE.exists():
+        _TPM_RULE.unlink()
+        print(f"Removed {_TPM_RULE}")
+        _reload_udev()
     return 0
 
 

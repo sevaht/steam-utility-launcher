@@ -73,18 +73,47 @@ def test_every_other_setting_is_kept(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "chosen",
+    "other",
     [
         {"runtimeId": "wine:/usr/bin/wine"},
-        {"runtimeId": "custom", "customRuntimePath": "/mine/proton"},
-        {"customRuntimePath": "/mine/proton"},
+        {"runtimeId": "custom", "customRuntimePath": "/old/proton"},
+        {"customRuntimePath": "/old/proton"},
     ],
 )
-def test_a_runtime_you_chose_is_never_replaced(
-    tmp_path: Path, chosen: dict[str, str]
+def test_a_runtime_that_isnt_z1s_proton_is_changed_to_match(
+    tmp_path: Path, other: dict[str, str], caplog: pytest.LogCaptureFixture
 ) -> None:
     config = tmp_path / "launcher-config.json"
-    config.write_text(json.dumps({"wine": {"enabled": True, **chosen}}))
+    config.write_text(
+        json.dumps({"authKey": "k", "wine": {"enabled": True, **other}})
+    )
+    with caplog.at_level("INFO"):
+        assert zemu.configure_wine(config, _PROTON) is True
+    data = _read(config)
+    wine = data["wine"]
+    assert isinstance(wine, dict)
+    assert wine["runtimeId"] == "custom"
+    assert wine["customRuntimePath"] == str(_PROTON)
+    assert data["authKey"] == "k"  # nothing else is touched
+    assert "switching it to" in caplog.text  # said out loud
+    assert "--no-configure" in caplog.text
+
+
+def test_a_runtime_that_already_matches_is_left_as_it_is(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "launcher-config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "wine": {
+                    "enabled": True,
+                    "runtimeId": "custom",
+                    "customRuntimePath": str(_PROTON),
+                }
+            }
+        )
+    )
     before = config.read_text()
     assert zemu.configure_wine(config, _PROTON) is False
     assert config.read_text() == before

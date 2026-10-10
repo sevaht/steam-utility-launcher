@@ -296,13 +296,16 @@ def pick_proton(steam: Steam, explicit: Path | None = None) -> Path | None:
 
 
 def configure_wine(config_path: Path, proton: Path) -> bool:
-    """Points ZEmu Launcher at `proton`, in its own settings file.
+    """Makes ZEmu Launcher use `proton`, in its own settings file.
 
-    Only fills in what hasn't been set: a runtime you chose in ZEmu's own
-    Properties screen is never replaced, and every other setting (the file also
-    holds your auth key and game directory) is kept exactly as it is. The
-    prefix is left unset, so ZEmu uses its own dedicated one. Returns whether
-    the file changed.
+    ZEmu follows the Proton chosen for Z1 Battle Royale (see `pick_proton`):
+    if its runtime isn't that one it is changed to match, so a Proton you
+    switch Z1 to is picked up by ZEmu too. Only the runtime is touched: every
+    other setting (the file also holds your auth key and game directory) is
+    kept exactly as it is, Wine being turned off there is respected, and the
+    prefix is left unset so ZEmu uses its own dedicated one. `--no-configure`
+    leaves the file alone entirely, for a runtime picked in ZEmu's own
+    Properties screen. Returns whether the file changed.
     """
     try:
         data = (
@@ -332,18 +335,40 @@ def configure_wine(config_path: Path, proton: Path) -> bool:
     if "enabled" not in wine:
         wine["enabled"] = True
         changed = True
-    if not wine.get("runtimeId") and not wine.get("customRuntimePath"):
+
+    previous = _runtime_description(wine)
+    if wine.get("runtimeId") != "custom" or wine.get(
+        "customRuntimePath"
+    ) != str(proton):
         wine["runtimeId"] = "custom"
         wine["customRuntimePath"] = str(proton)
         changed = True
+        if previous is None:
+            logger.info("Pointed ZEmu Launcher at %s", proton)
+        else:
+            logger.warning(
+                "ZEmu Launcher was set to %s; switching it to %s, the Proton"
+                " used for Z1 Battle Royale (--no-configure leaves ZEmu's own"
+                " choice alone). ZEmu's prefix is upgraded by a newer Proton.",
+                previous,
+                proton,
+            )
 
     if changed:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         staging = config_path.with_suffix(".json.tmp")
         staging.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         staging.replace(config_path)
-        logger.info("Pointed ZEmu Launcher at %s", proton)
     return changed
+
+
+def _runtime_description(wine: dict[str, object]) -> str | None:
+    """What ZEmu's runtime is set to now, or None if nothing is."""
+    path = wine.get("customRuntimePath")
+    if path:
+        return str(path)
+    runtime = wine.get("runtimeId")
+    return str(runtime) if runtime else None
 
 
 def _fuse2_available() -> bool:

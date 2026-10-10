@@ -115,19 +115,54 @@ expression the launcher uses for it (copied from its source into a table in
 values (the prefix's `MachineGuid`, the C: volume serial, the first disk's
 serial/model/firmware, DMI/BIOS data, CPU name, physical MAC addresses).
 Anything it can't read is omitted, never invented. The ROTK team does not
-officially support Linux, so their server may still decide to refuse it, and
-the app's TPM attestation (which also needs PowerShell) is not supported and is
-skipped.
+officially support Linux, so their server may still decide to refuse it.
+
+It also answers, for real, the other fixed commands the app runs, each matched
+exactly and each from a genuine source rather than an invented one:
+
+- **The installer's "is the app running / close it" checks** (what ROTK's
+  in-app updater runs), with real process enumeration.
+- **Two diagnostics commands.** System info comes from Wine's own WMI (OS,
+  memory, GPU; `pageFiles` is empty because Wine has no Windows pagefile). The
+  crash-event query answers an empty list, because Wine keeps no Windows
+  Application log.
+- **The two TPM proofs.** ROTK Launcher signs a one-time challenge with a key
+  held in a TPM so that a modified launcher can't make up a hardware identity.
+  The stand-in does the same with **this machine's real TPM 2.0**, through
+  `/dev/tpmrm0` (see `enable-hwid-access`): the signing and identity keys live
+  in the TPM and can't be exported (the files under
+  `~/.local/share/steam-utility-launcher/tpm/` are only TPM-wrapped blobs that
+  load on this TPM alone), and it reports the endorsement key, TPM
+  manufacturer, version and firmware. All of this is **opt-in**
+  (`rotk-launcher --tpm`): by default the TPM commands are declined and the
+  app sees exactly what it would on a PC without a TPM. Once you opt in it has
+  to work: if there is no TPM, your user can't use it (run
+  `enable-hwid-access`), or setting it up fails, `rotk-launcher` stops with an
+  error before starting anything. Two further extras
+  need `--tpm-endorsement` (which implies `--tpm`), and are meant only for the
+  day the server starts requiring them.
+  They make the TPM answer as an elevated Windows user would, using nothing
+  but this machine's own TPM and certificates. On AMD TPMs, which keep no
+  certificate inside the TPM, the launcher then fetches the endorsement key's
+  certificate chain once from `ftpm.amd.com` (the URL is a hash of your
+  endorsement public key, the only thing AMD sees; nothing else is ever
+  requested) and keeps it as `ek-cert-N.der` next to the key blobs; it is sent
+  with the anchor. The credential activation the server may then request
+  is performed by the TPM too (with an endorsement-hierarchy policy session),
+  so the launcher shows the enrolment as an elevated Windows user would see it. If the TPM can't be used, the
+  commands are declined, exactly as on a PC without one: it never substitutes
+  a software key.
 
 Every PowerShell command that reaches the stand-in is appended to
 `~/.local/share/steam-utility-launcher/powershell-commands.log`; `rotk-launcher`
 prints that path at the start of every run. Each record has a verdict:
 
-- `answered`: the exact fingerprint query. Only the slot names are logged
-  (answered, unreadable here, or without a reader), never the hardware values.
-- `declined`: anything else, such as the installer's availability probes, TPM
-  and diagnostics scripts. It exits 1 with no output, as a missing PowerShell
-  would, which is what those callers expect.
+- `answered`: the exact fingerprint query (only the slot names are logged
+  (answered, unreadable here, or without a reader), never the hardware values),
+  or one of the other fixed commands above.
+- `declined`: anything else, and a TPM command when the TPM can't be used (the
+  record says why). It exits 1 with no output, as a missing PowerShell would,
+  which is what those callers expect.
 - `HWID-UNRECOGNIZED`: a command that references hardware-ID data (the WMI
   classes and registry value the fingerprint reads, or the fingerprint's
   scaffold) but is not exactly the query above, for example because ROTK
@@ -169,7 +204,9 @@ them in `vc_runtime.py`.
 
 Four values (`smbios_uuid`, `baseboard_serial`, `bios_serial`,
 `enclosure_serial`) come from firmware files under `/sys/class/dmi/id` that
-Linux makes root-only. To let your user read them, run once, as yourself:
+Linux makes root-only, and the TPM (`/dev/tpmrm0`) is normally only usable by
+the `tss` group. To let your user read the files and use the TPM, run once, as
+yourself:
 
 ```bash
 steam-utility-launcher enable-hwid-access
@@ -184,7 +221,12 @@ file) and applies it immediately with `systemd-tmpfiles`, so it takes effect at
 once (no new shell or logout needed) and again at every boot. Without
 systemd-tmpfiles it changes the permissions directly, which lasts until reboot.
 Every local user can then read those serials, as WMI already allows on Windows.
-Undo it with:
+If the machine has a TPM it also writes
+`/etc/udev/rules.d/70-steam-utility-launcher-tpm.rules`, a `uaccess` rule that
+gives the logged-in desktop user access to the TPM's resource manager (applied
+at once with `udevadm`). Each open of that device is isolated by the kernel, so
+this only lets your own programs use the TPM, the usual arrangement on a
+desktop. Undo it all with:
 
 ```bash
 steam-utility-launcher enable-hwid-access --disable
@@ -195,6 +237,9 @@ downloading, installing or starting anything, and if any of them exists but
 can't be read by your user it stops with an error telling you to run
 `enable-hwid-access`. It never carries on with an incomplete fingerprint. (A
 file that doesn't exist on your firmware is fine: there is nothing to read.)
+The TPM is optional, and only checked when you pass `--tpm`: then a missing
+TPM or one your user can't use is an error with the same fix
+(`enable-hwid-access`), and so is a TPM that fails to set up.
 
 ### ZEmu: King of the Kill
 
@@ -216,12 +261,16 @@ just:
    first time, and **verifies its signature** (ZEmu signs releases with a
    minisign key, which is pinned in the tool) before installing or running
    anything. A file that fails verification is never written to disk.
-2. Points ZEmu Launcher at a Proton install in its own settings file, **only
-   filling in what you haven't set yourself**: it prefers the Proton Steam uses
-   for Z1 Battle Royale, else the newest stable one, or pass `--proton PATH`. A
-   runtime you chose in ZEmu's Properties screen is never replaced, nothing else
-   in the file is touched, and ZEmu keeps its own dedicated prefix, separate
-   from your Z1/ROTK one. `--no-configure` skips this step.
+2. Points ZEmu Launcher at the Proton Steam uses for Z1 Battle Royale (else
+   the newest stable one, or pass `--proton PATH`), in its own settings file.
+   ZEmu **follows** it: if its runtime is anything else it is changed to match
+   (and the change is logged as a warning), so switching Z1 to another Proton
+   switches ZEmu too. Only the runtime is touched: nothing else in the file is
+   changed, Wine switched off there is respected, and ZEmu keeps its own
+   dedicated prefix, separate from your Z1/ROTK one. A newer Proton upgrades
+   that prefix, which Proton can't undo, so copy it first if that matters.
+   `--no-configure` skips this step, for a runtime you want to pick in ZEmu's
+   own Properties screen.
 3. Runs it, with `WEBKIT_DISABLE_DMABUF_RENDERER=1` set (a blank-window
    workaround for NVIDIA) unless you've set it, and `APPIMAGE_EXTRACT_AND_RUN=1`
    if FUSE 2 isn't installed.

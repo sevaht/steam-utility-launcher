@@ -369,6 +369,57 @@ class SteamLocation:
         return paths
 
 
+_DXVK_DLLS = ("d3d11", "d3d10core", "d3d9", "dxgi")
+_NVAPI_DLLS = ("nvapi64", "nvofapi64", "nvapi")
+
+
+def _in_windows_directory(prefix: Path, directory: str, name: str) -> Path:
+    return prefix / "drive_c" / "windows" / directory / f"{name}.dll"
+
+
+def _is_dxvk(prefix: Path, name: str) -> bool:
+    try:
+        content = _in_windows_directory(prefix, "system32", name).read_bytes()
+    except OSError:
+        return False
+    return b"dxvk" in content.lower()
+
+
+def proton_dll_overrides(prefix: Path) -> str:
+    """The DLL overrides Proton's `proton` script would set for this prefix.
+
+    This tool runs Proton's bare `wine` rather than the `proton` script, so
+    without these Wine silently uses its own (OpenGL) Direct3D instead of the
+    DXVK that Proton put in the prefix, which is far slower. Only DLLs that are
+    actually in the prefix are overridden, so a prefix Proton hasn't set up
+    yet (or one set to use WineD3D) is left alone.
+    """
+    parts = []
+    # d3d10core is only a thin forwarder to d3d11 and has no marker of its own.
+    dxvk = [
+        name
+        for name in _DXVK_DLLS
+        if _is_dxvk(prefix, "d3d11" if name == "d3d10core" else name)
+    ]
+    if dxvk:
+        parts.append(f"{','.join(dxvk)}=n")
+    if any(
+        _in_windows_directory(prefix, "system32", name).is_file()
+        for name in _NVAPI_DLLS
+    ):
+        parts.append("nvapi64,nvofapi64,nvapi=n;nvcuda=b")
+    # As Proton always does: BattlEye's client, and a driver that crashes.
+    parts.extend(("beclient,beclient_x64=b,n", "winebth.sys=d"))
+    return ";".join(parts)
+
+
+def _add_proton_overrides(env: dict[str, str], prefix: Path) -> None:
+    existing = env.get("WINEDLLOVERRIDES", "")
+    env["WINEDLLOVERRIDES"] = ";".join(
+        part for part in (proton_dll_overrides(prefix), existing) if part
+    )
+
+
 @dataclass
 class Steam:
     location: SteamLocation
@@ -476,7 +527,16 @@ class Steam:
         game_id: str,
         cwd: Path | None = None,
         system_wine: bool = False,
+        via_proton_script: bool = False,
     ) -> Process:
+        """Prepares a process to run in the game's Proton prefix.
+
+        By default Proton's bare `wine` is used, which suits utilities that
+        only need the prefix (and this adds the DLL overrides a game needs).
+        With `via_proton_script` the command goes through Proton's own
+        `proton run`, exactly as Steam would launch it: for something that
+        _is_ the game, so it gets Proton's complete environment.
+        """
         if not command_line:
             msg = "No command line provided."
             raise RuntimeError(msg)
@@ -522,9 +582,16 @@ class Steam:
                 if tool.is_proton():
                     is_wine = True
                     prefix_runner, command_line = self._proton_launch_command(
-                        tool=tool, command_line=command_line
+                        tool=tool,
+                        command_line=command_line,
+                        via_script=via_proton_script,
                     )
-                    env.update({"PROTON_DIR": str(tool.binary_path.parent)})
+                    self._add_proton_environment(
+                        env,
+                        tool=tool,
+                        game_id=game_id,
+                        via_script=via_proton_script,
+                    )
         if is_wine:
             self._ensure_steamapps_mapping(game_id=game_id)
             compat_data_path = self.game_compatdata_path(game_id=game_id)
@@ -555,13 +622,41 @@ class Steam:
             prefix_runner=prefix_runner,
         )
 
+    def _add_proton_environment(
+        self,
+        env: dict[str, str],
+        *,
+        tool: CompatibilityTool,
+        game_id: str,
+        via_script: bool,
+    ) -> None:
+        env["PROTON_DIR"] = str(tool.binary_path.parent)
+        if not via_script:  # the script sets these itself
+            _add_proton_overrides(env, self.game_wine_prefix(game_id=game_id))
+
     def _proton_launch_command(
-        self, *, tool: CompatibilityTool, command_line: list[str]
+        self,
+        *,
+        tool: CompatibilityTool,
+        command_line: list[str],
+        via_script: bool = False,
     ) -> tuple[list[str], list[str]]:
         proton_binary = Path(tool.command_line(verb=Verb.RUN)[0])
         proton_wine = proton_binary.parent / "files" / "bin" / "wine"
         if proton_wine.exists():
             prefix_runner = [str(proton_wine)]
+            if via_script:
+                # The verb Steam launches games with: first waits for any
+                # earlier session in the prefix to end. (`reg` edits still
+                # use the bare wine; see Process.)
+                logger.info(
+                    "Starting through Proton; this first waits for any"
+                    " earlier Wine session in the prefix to exit."
+                )
+                return prefix_runner, [
+                    *tool.command_line(verb=Verb.WAIT_FOR_EXIT_AND_RUN),
+                    *command_line,
+                ]
             return prefix_runner, [str(proton_wine), *command_line]
         prefix_runner = tool.command_line(verb=Verb.RUN)
         return prefix_runner, prefix_runner + command_line

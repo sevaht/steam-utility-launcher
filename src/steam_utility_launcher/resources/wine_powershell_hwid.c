@@ -24,7 +24,9 @@
  *   answered           the exact fingerprint query above (only slot names are
  *                      logged, never the hardware values), or one of the
  *                      installer's "is the app running / close it" one-liners
- *                      (see answer_instance_check), which are answered for real.
+ *                      (see answer_instance_check), one of the diagnostics
+ *                      commands (see answer_diagnostic), or one of the two TPM
+ *                      proofs (see answer_tpm), answered for real.
  *   declined           anything else: exit 1 with no output, exactly as a
  *                      missing PowerShell would (the app's TPM and diagnostics
  *                      code rely on that).
@@ -44,8 +46,15 @@
  */
 #define _WIN32_WINNT 0x0600
 #define WIN32_LEAN_AND_MEAN
+#define COBJMACROS
 #include <windows.h>
+#include <objbase.h>
+#include <wbemcli.h>
 #include <tlhelp32.h>
+#include <ctype.h>
+#include <stdint.h>
+
+#include "tpm2.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -450,6 +459,7 @@ static void put_json_string(buffer *b, const char *s) {
 #define ENV_LOG L"SUL_POWERSHELL_LOG"
 #define ENV_NO_POPUP L"SUL_POWERSHELL_NO_POPUP"
 #define POPUP_FLAG L"--sul-show-error"
+#define PREPARE_FLAG L"--sul-tpm-prepare"
 #define LOG_NAME L"sul-powershell-commands.log"
 #define LOG_MAX_BYTES (2 * 1024 * 1024)
 #define PATH_CAP (MAX_PATH * 2)
@@ -882,6 +892,474 @@ static int answer_instance_check(const char *cmdline, const char *command) {
     return code;
 }
 
+/* ----------------------------- diagnostics the app collects while it runs */
+
+/* Two encoded commands the app runs for its diagnostics report (neither affects
+ * a launch; the app treats a failure as "unavailable"). Like everything else
+ * here they are matched exactly, whitespace aside, and anything that differs is
+ * declined. The texts below are the commands as logged by this stand-in; in the
+ * event query the three digit runs (two Unix-ms times and a PID) are holes.
+ *
+ *  1. system info: caption/version/build/memory of Win32_OperatingSystem, the
+ *     Win32_VideoController list and Win32_PageFileUsage, as one JSON object.
+ *     Answered from Wine's own WMI, i.e. what Windows software sees under Wine.
+ *     Wine has no Win32_PageFileUsage (and no Windows pagefile), which a real
+ *     PowerShell reports as no instances, so `pageFiles` is [].
+ *  2. crash events: Application-log records (IDs 1000/1001/1002) about H1Z1.exe
+ *     in the launch window. Wine keeps no such log, so a real PowerShell prints
+ *     the empty array; nothing is invented. */
+#define HOLE "\001"
+
+static const char SYSINFO_SCRIPT[] =
+    "$ErrorActionPreference = 'Stop'\n"
+    "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n"
+    "$osInfo = Get-CimInstance Win32_OperatingSystem\n"
+    "$videoInfo = @(Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion, DriverDate, AdapterRAM, CurrentHorizontalResolution, CurrentVerticalResolution)\n"
+    "$pageInfo = @(Get-CimInstance Win32_PageFileUsage | Select-Object AllocatedBaseSize, CurrentUsage, PeakUsage)\n"
+    "[pscustomobject]@{ caption=$osInfo.Caption; version=$osInfo.Version; build=$osInfo.BuildNumber; freePhysicalMemoryKiB=$osInfo.FreePhysicalMemory; freeVirtualMemoryKiB=$osInfo.FreeVirtualMemory; totalVirtualMemoryKiB=$osInfo.TotalVirtualMemorySize; video=$videoInfo; pageFiles=$pageInfo } | ConvertTo-Json -Depth 6 -Compress";
+
+static const char EVENTS_SCRIPT[] =
+    "$ErrorActionPreference = 'Stop'\n"
+    "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n"
+    "$from = [DateTimeOffset]::FromUnixTimeMilliseconds(" HOLE ").LocalDateTime\n"
+    "$until = [DateTimeOffset]::FromUnixTimeMilliseconds(" HOLE ").LocalDateTime\n"
+    "$gameProcessId = [uint32]" HOLE "\n"
+    "$records = @(Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000,1001,1002; StartTime=$from; EndTime=$until} -MaxEvents 100 -ErrorAction SilentlyContinue)\n"
+    "$result = @()\n"
+    "foreach ($record in $records) {\n"
+    "  $xml = [xml]$record.ToXml()\n"
+    "  $fields = @{}\n"
+    "  foreach ($entry in $xml.Event.EventData.Data) { if ($entry.Name) { $fields[[string]$entry.Name] = [string]$entry.'#text' } }\n"
+    "  $xmlText = $xml.OuterXml\n"
+    "  if ($xmlText -notmatch '(?i)H1Z1\\.exe') { continue }\n"
+    "  $eventPid = $null\n"
+    "  foreach ($name in @('ProcessId','ProcessID','FaultingProcessId')) {\n"
+    "    if ($fields.ContainsKey($name)) {\n"
+    "      try { $rawPid = $fields[$name]; $eventPid = if ($rawPid.StartsWith('0x')) { [Convert]::ToUInt32($rawPid.Substring(2),16) } else { [uint32]$rawPid } } catch {}\n"
+    "      break\n"
+    "    }\n"
+    "  }\n"
+    "  if ($eventPid -ne $null -and $eventPid -ne $gameProcessId) { continue }\n"
+    "  # Keep structured fault information only, never rendered messages/command lines.\n"
+    "  $selected = @{}\n"
+    "  foreach ($name in @('AppName','AppVersion','AppTimeStamp','ModuleName','ModuleVersion','ModuleTimeStamp','ExceptionCode','FaultingOffset','ProcessId','ProcessCreationTime','ReportId','IntegratorReportId','EventName','Response','CabId','P1','P2','P3','P4','P5','P6','P7','P8','P9','P10','HangType')) {\n"
+    "    if ($fields.ContainsKey($name)) { $selected[$name] = $fields[$name] }\n"
+    "  }\n"
+    "  $result += [pscustomobject]@{ at=$record.TimeCreated.ToUniversalTime().ToString('o'); eventId=$record.Id; provider=$record.ProviderName; correlation= $(if ($eventPid -ne $null) {'pid-and-time'} else {'executable-and-time-only'}); data=$selected }\n"
+    "}\n"
+    "ConvertTo-Json -InputObject @($result) -Depth 6 -Compress";
+
+/* One whitespace-collapsed command matches a collapsed template exactly, except
+ * that each HOLE stands for a run of 1-20 digits. */
+static int matches_with_digit_holes(const char *text, const char *tmpl) {
+    while (*tmpl) {
+        if (*tmpl == HOLE[0]) {
+            size_t n = 0;
+            while (isdigit((unsigned char)text[n])) n++;
+            if (n == 0 || n > 20) return 0;
+            text += n;
+            tmpl++;
+        } else if (*text++ != *tmpl++) {
+            return 0;
+        }
+    }
+    return *text == 0;
+}
+
+static int command_is(const char *command, const char *tmpl) {
+    char *text = _strdup(command), *want = _strdup(tmpl);
+    int same = 0;
+    if (text && want) {
+        collapse_whitespace(text);
+        collapse_whitespace(want);
+        same = matches_with_digit_holes(text, want);
+    }
+    free(text);
+    free(want);
+    return same;
+}
+
+/* ---- Wine's WMI, through COM ---- */
+
+static IWbemServices *wmi_connect(void) {
+    IWbemLocator *locator = NULL;
+    IWbemServices *services = NULL;
+    BSTR resource;
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return NULL;
+    hr = CoCreateInstance(&CLSID_WbemLocator, NULL, CLSCTX_INPROC_SERVER, &IID_IWbemLocator,
+                          (void **)&locator);
+    if (FAILED(hr)) return NULL;
+    resource = SysAllocString(L"ROOT\\CIMV2");
+    hr = IWbemLocator_ConnectServer(locator, resource, NULL, NULL, NULL, 0, NULL, NULL, &services);
+    SysFreeString(resource);
+    IWbemLocator_Release(locator);
+    return SUCCEEDED(hr) ? services : NULL;
+}
+
+static IEnumWbemClassObject *wmi_query(IWbemServices *services, const wchar_t *wql) {
+    IEnumWbemClassObject *rows = NULL;
+    BSTR language = SysAllocString(L"WQL"), query = SysAllocString(wql);
+    HRESULT hr = IWbemServices_ExecQuery(services, language, query,
+                                         WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                                         NULL, &rows);
+    SysFreeString(language);
+    SysFreeString(query);
+    return SUCCEEDED(hr) ? rows : NULL;
+}
+
+/* A CIM datetime ("20230627000000.000000+000": local time and the offset in
+ * minutes east of UTC) as Unix milliseconds. */
+static int cim_datetime_ms(const wchar_t *s, long long *ms) {
+    int y, mo, d, h, mi, se, us, off;
+    wchar_t sign;
+    long long days, a, era, yoe, doy, doe;
+    if (wcslen(s) < 25 ||
+        swscanf(s, L"%4d%2d%2d%2d%2d%2d.%6d%lc%3d", &y, &mo, &d, &h, &mi, &se, &us, &sign, &off) != 9)
+        return 0;
+    if (sign == L'-') off = -off;
+    a = mo <= 2 ? 1 : 0;                      /* days from civil (Hinnant) */
+    era = ((y - a) >= 0 ? (y - a) : (y - a - 399)) / 400;
+    yoe = (y - a) - era * 400;
+    doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    days = era * 146097 + doe - 719468;
+    *ms = ((days * 24 + h) * 60 + mi - off) * 60 * 1000 + se * 1000LL + us / 1000;
+    return 1;
+}
+
+typedef enum { PROP_STRING, PROP_NUMBER, PROP_DATE } prop_kind;
+
+/* Appends one WMI property as JSON the way PowerShell 5.1's ConvertTo-Json
+ * writes it: strings quoted, numbers bare, a DateTime as "\/Date(ms)\/", and
+ * null for a property the provider doesn't have. */
+static void put_property(buffer *b, IWbemClassObject *row, const wchar_t *name, prop_kind kind) {
+    VARIANT v;
+    char text[VALUE_MAX], number[32];
+    unsigned long long n = 0;
+    int have = 0;
+    VariantInit(&v);
+    if (SUCCEEDED(IWbemClassObject_Get(row, name, 0, &v, NULL, NULL))) {
+        switch (V_VT(&v)) {
+        case VT_BSTR:
+            if (kind == PROP_STRING) {
+                utf8_from_wide(V_BSTR(&v), text, sizeof text);
+                have = 1;
+            } else if (kind == PROP_NUMBER) {
+                n = _wcstoui64(V_BSTR(&v), NULL, 10);   /* WMI hands uint64 over as text */
+                have = 1;
+            } else {
+                long long ms;
+                if (cim_datetime_ms(V_BSTR(&v), &ms)) {
+                    snprintf(text, sizeof text, "%lld", ms);
+                    have = 1;
+                }
+            }
+            break;
+        case VT_I4:  n = (unsigned int)V_I4(&v);  have = kind == PROP_NUMBER; break;
+        case VT_UI4: n = V_UI4(&v);               have = kind == PROP_NUMBER; break;
+        case VT_I2:  n = (unsigned short)V_I2(&v); have = kind == PROP_NUMBER; break;
+        case VT_UI2: n = V_UI2(&v);               have = kind == PROP_NUMBER; break;
+        case VT_I8:  n = (unsigned long long)V_I8(&v); have = kind == PROP_NUMBER; break;
+        default: break;
+        }
+    }
+    if (!have) {
+        put_str(b, "null");
+    } else if (kind == PROP_STRING) {
+        put_json_string(b, text);
+    } else if (kind == PROP_NUMBER) {
+        snprintf(number, sizeof number, "%llu", n);
+        put_str(b, number);
+    } else {
+        put_str(b, "\"\\/Date(");
+        put_str(b, text);
+        put_str(b, ")\\/\"");
+    }
+    VariantClear(&v);
+}
+
+typedef struct { const char *json_key; const wchar_t *property; prop_kind kind; } column;
+
+static void put_columns(buffer *b, IWbemClassObject *row, const column *columns, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (i) put_str(b, ",");
+        put_json_string(b, columns[i].json_key);
+        put_str(b, ":");
+        put_property(b, row, columns[i].property, columns[i].kind);
+    }
+}
+
+/* Writes the system-info object; returns 0 (writing nothing) if Wine's WMI
+ * can't be queried or has no operating-system row. */
+static int answer_sysinfo(buffer *out) {
+    static const column os[] = {
+        {"caption", L"Caption", PROP_STRING},
+        {"version", L"Version", PROP_STRING},
+        {"build", L"BuildNumber", PROP_STRING},
+        {"freePhysicalMemoryKiB", L"FreePhysicalMemory", PROP_NUMBER},
+        {"freeVirtualMemoryKiB", L"FreeVirtualMemory", PROP_NUMBER},
+        {"totalVirtualMemoryKiB", L"TotalVirtualMemorySize", PROP_NUMBER},
+    };
+    static const column video[] = {
+        {"Name", L"Name", PROP_STRING},
+        {"DriverVersion", L"DriverVersion", PROP_STRING},
+        {"DriverDate", L"DriverDate", PROP_DATE},
+        {"AdapterRAM", L"AdapterRAM", PROP_NUMBER},
+        {"CurrentHorizontalResolution", L"CurrentHorizontalResolution", PROP_NUMBER},
+        {"CurrentVerticalResolution", L"CurrentVerticalResolution", PROP_NUMBER},
+    };
+    IWbemServices *services = wmi_connect();
+    IEnumWbemClassObject *rows;
+    IWbemClassObject *row = NULL;
+    ULONG got = 0;
+    int ok = 0, first = 1;
+    if (!services) return 0;
+
+    rows = wmi_query(services,
+        L"SELECT Caption, Version, BuildNumber, FreePhysicalMemory, FreeVirtualMemory,"
+        L" TotalVirtualMemorySize FROM Win32_OperatingSystem");
+    if (rows && SUCCEEDED(IEnumWbemClassObject_Next(rows, WBEM_INFINITE, 1, &row, &got)) && got == 1) {
+        put_str(out, "{");
+        put_columns(out, row, os, sizeof os / sizeof os[0]);
+        IWbemClassObject_Release(row);
+        ok = 1;
+    }
+    if (rows) IEnumWbemClassObject_Release(rows);
+    if (!ok) { IWbemServices_Release(services); return 0; }
+
+    put_str(out, ",\"video\":[");
+    rows = wmi_query(services,
+        L"SELECT Name, DriverVersion, DriverDate, AdapterRAM, CurrentHorizontalResolution,"
+        L" CurrentVerticalResolution FROM Win32_VideoController");
+    while (rows && SUCCEEDED(IEnumWbemClassObject_Next(rows, WBEM_INFINITE, 1, &row, &got)) && got == 1) {
+        if (!first) put_str(out, ",");
+        first = 0;
+        put_str(out, "{");
+        put_columns(out, row, video, sizeof video / sizeof video[0]);
+        put_str(out, "}");
+        IWbemClassObject_Release(row);
+    }
+    if (rows) IEnumWbemClassObject_Release(rows);
+    IWbemServices_Release(services);
+    put_str(out, "],\"pageFiles\":[]}\n");
+    return 1;
+}
+
+/* Answers one of the two diagnostics commands: returns 0 if it did, -1 if
+ * `command` is neither (nothing is logged or done then). */
+static int answer_diagnostic(const char *cmdline, const char *command) {
+    buffer out = {0};
+    DWORD written = 0;
+    const char *note;
+    if (command_is(command, SYSINFO_SCRIPT)) {
+        if (!answer_sysinfo(&out)) {
+            free(out.data);
+            log_command("declined", cmdline, command, "diagnostic: system info, but Wine's WMI could not be queried");
+            return EXIT_DECLINED;
+        }
+        note = "diagnostic: system info from Wine's WMI (pageFiles is empty: Wine has none)";
+    } else if (command_is(command, EVENTS_SCRIPT)) {
+        put_str(&out, "[]\n");
+        note = "diagnostic: Application-log crash events -> [] (Wine keeps no such log)";
+    } else {
+        return -1;
+    }
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), out.data, (DWORD)out.len, &written, NULL);
+    free(out.data);
+    log_command("answered", cmdline, command, note);
+    return 0;
+}
+
+/* ------------------------------------------- the app's two TPM commands */
+
+/* Level 1 and level 2 ("anchor") TPM proofs, exactly as the app runs them
+ * (-Command, with the binding message base64 in ROTK_TPM_MESSAGE_B64). They
+ * are answered with this machine's real TPM (see tpm2.h); if it can't be used
+ * they are declined, as on a PC without a TPM.
+ * The third command, credential activation, is answered by the TPM as well
+ * (as an elevated Windows user would see it). */
+
+static const char TPM_SIGN_SCRIPT[] =
+    "\n"
+    "$ErrorActionPreference = \"Stop\"\n"
+    "$encoded = $env:ROTK_TPM_MESSAGE_B64\n"
+    "if ([string]::IsNullOrEmpty($encoded)) { throw \"no message\" }\n"
+    "$data = [Convert]::FromBase64String($encoded)\n"
+    "$provider = [System.Security.Cryptography.CngProvider]::new(\"Microsoft Platform Crypto Provider\")\n"
+    "if ([System.Security.Cryptography.CngKey]::Exists(\"rotk-hwid-tpm-v1\", $provider)) {\n"
+    "  $key = [System.Security.Cryptography.CngKey]::Open(\"rotk-hwid-tpm-v1\", $provider)\n"
+    "} else {\n"
+    "  $p = [System.Security.Cryptography.CngKeyCreationParameters]::new()\n"
+    "  $p.Provider = $provider\n"
+    "  $p.ExportPolicy = [System.Security.Cryptography.CngExportPolicies]::None\n"
+    "  $p.KeyUsage = [System.Security.Cryptography.CngKeyUsages]::Signing\n"
+    "  $key = [System.Security.Cryptography.CngKey]::Create([System.Security.Cryptography.CngAlgorithm]::ECDsaP256, \"rotk-hwid-tpm-v1\", $p)\n"
+    "}\n"
+    "$ecdsa = [System.Security.Cryptography.ECDsaCng]::new($key)\n"
+    "$sig = $ecdsa.SignData($data, [System.Security.Cryptography.HashAlgorithmName]::SHA256)\n"
+    "$pub = $key.Export([System.Security.Cryptography.CngKeyBlobFormat]::EccPublicBlob)\n"
+    "Write-Output ([Convert]::ToBase64String($pub) + \"|\" + [Convert]::ToBase64String($sig))";
+
+static const char TPM_ANCHOR_SCRIPT[] =
+    "\n"
+    "$ErrorActionPreference = \"Stop\"\n"
+    "$encoded = $env:ROTK_TPM_MESSAGE_B64\n"
+    "if ([string]::IsNullOrEmpty($encoded)) { throw \"no message\" }\n"
+    "$data = [Convert]::FromBase64String($encoded)\n"
+    "\n"
+    "Add-Type -TypeDefinition @\"\n"
+    "using System; using System.Runtime.InteropServices;\n"
+    "public static class RotkNCrypt {\n"
+    "  [DllImport(\"ncrypt.dll\")] public static extern int NCryptOpenStorageProvider(out IntPtr phProvider, [MarshalAs(UnmanagedType.LPWStr)] string pszProviderName, uint dwFlags);\n"
+    "  [DllImport(\"ncrypt.dll\")] public static extern int NCryptGetProperty(IntPtr hObject, [MarshalAs(UnmanagedType.LPWStr)] string pszProperty, byte[] pbOutput, uint cbOutput, out uint pcbResult, uint dwFlags);\n"
+    "  [DllImport(\"ncrypt.dll\")] public static extern int NCryptFreeObject(IntPtr hObject);\n"
+    "  public static byte[] Get(IntPtr h, string name) {\n"
+    "    uint cb; if (NCryptGetProperty(h, name, null, 0, out cb, 0) != 0) return null;\n"
+    "    var buf = new byte[cb]; if (NCryptGetProperty(h, name, buf, cb, out cb, 0) != 0) return null;\n"
+    "    Array.Resize(ref buf, (int)cb); return buf; }\n"
+    "}\n"
+    "\"@\n"
+    "\n"
+    "$provider = [System.Security.Cryptography.CngProvider]::new(\"Microsoft Platform Crypto Provider\")\n"
+    "if ([System.Security.Cryptography.CngKey]::Exists(\"rotk-tpm-aik-v1\", $provider)) {\n"
+    "  $key = [System.Security.Cryptography.CngKey]::Open(\"rotk-tpm-aik-v1\", $provider)\n"
+    "} else {\n"
+    "  $p = [System.Security.Cryptography.CngKeyCreationParameters]::new()\n"
+    "  $p.Provider = $provider\n"
+    "  $p.ExportPolicy = [System.Security.Cryptography.CngExportPolicies]::None\n"
+    "  $p.KeyUsage = [System.Security.Cryptography.CngKeyUsages]::Signing\n"
+    "  $p.Parameters.Add([System.Security.Cryptography.CngProperty]::new(\"PCP_KEY_USAGE_POLICY\", [BitConverter]::GetBytes([uint32]1), [System.Security.Cryptography.CngPropertyOptions]::None))\n"
+    "  $key = [System.Security.Cryptography.CngKey]::Create([System.Security.Cryptography.CngAlgorithm]::ECDsaP256, \"rotk-tpm-aik-v1\", $p)\n"
+    "}\n"
+    "$ecdsa = [System.Security.Cryptography.ECDsaCng]::new($key)\n"
+    "$sig = $ecdsa.SignData($data, [System.Security.Cryptography.HashAlgorithmName]::SHA256)\n"
+    "$pub = $key.Export([System.Security.Cryptography.CngKeyBlobFormat]::EccPublicBlob)\n"
+    "$opaque = $key.Export([System.Security.Cryptography.CngKeyBlobFormat]::new(\"OpaqueKeyBlob\"))\n"
+    "$header = [BitConverter]::ToUInt32($opaque, 4)\n"
+    "$cbPublic = [BitConverter]::ToUInt32($opaque, 16)\n"
+    "$tpmPublic = New-Object byte[] $cbPublic\n"
+    "[Array]::Copy($opaque, $header, $tpmPublic, 0, $cbPublic)\n"
+    "$r = @{\n"
+    "  publicKey = [Convert]::ToBase64String($pub)\n"
+    "  signature = [Convert]::ToBase64String($sig)\n"
+    "  tpmPublic = [Convert]::ToBase64String($tpmPublic)\n"
+    "}\n"
+    "$h = [IntPtr]::Zero\n"
+    "if ([RotkNCrypt]::NCryptOpenStorageProvider([ref]$h, \"Microsoft Platform Crypto Provider\", 0) -eq 0) {\n"
+    "  try {\n"
+    "    $ekpub = [RotkNCrypt]::Get($h, \"PCP_EKPUB\")\n"
+    "    if ($ekpub -ne $null) { $r.ekPublicKey = [Convert]::ToBase64String($ekpub) }\n"
+    "    $man = [RotkNCrypt]::Get($h, \"PCP_TPM_MANUFACTURER_ID\")\n"
+    "    if ($man -ne $null) { $r.manufacturer = [Text.Encoding]::Unicode.GetString($man).Trim([char]0).Trim() }\n"
+    "    $ver = [RotkNCrypt]::Get($h, \"PCP_TPM_VERSION\")\n"
+    "    if ($ver -ne $null -and $ver.Length -ge 4) { $v = [BitConverter]::ToUInt32($ver, 0); $r.version = \"$($v -shr 16).$($v -band 0xffff)\" }\n"
+    "    $fw = [RotkNCrypt]::Get($h, \"PCP_TPM_FW_VERSION\")\n"
+    "    if ($fw -ne $null) { $r.firmware = (($fw | ForEach-Object { $_.ToString(\"x2\") }) -join \"\") }\n"
+    "    $certs = @()\n"
+    "    $cert = [RotkNCrypt]::Get($h, \"PCP_EKCERT\")\n"
+    "    if ($cert -ne $null -and $cert.Length -gt 0) { $certs += [Convert]::ToBase64String($cert) }\n"
+    "    if ($certs.Count -eq 0) {\n"
+    "      try {\n"
+    "        $info = Get-TpmEndorsementKeyInfo -HashAlgorithm Sha256\n"
+    "        foreach ($c in @($info.ManufacturerCertificates) + @($info.AdditionalCertificates)) {\n"
+    "          if ($c -ne $null -and $c.RawData -ne $null) { $certs += [Convert]::ToBase64String($c.RawData) }\n"
+    "        }\n"
+    "      } catch {}\n"
+    "    }\n"
+    "    $r.ekCertificates = $certs\n"
+    "  } finally { [void][RotkNCrypt]::NCryptFreeObject($h) }\n"
+    "}\n"
+    "Write-Output ($r | ConvertTo-Json -Compress)";
+
+static const char TPM_ACTIVATE_SCRIPT[] =
+    "\n"
+    "$ErrorActionPreference = \"Stop\"\n"
+    "$blob = [Convert]::FromBase64String($env:ROTK_TPM_ACTIVATION)\n"
+    "$provider = [System.Security.Cryptography.CngProvider]::new(\"Microsoft Platform Crypto Provider\")\n"
+    "$key = [System.Security.Cryptography.CngKey]::Open(\"rotk-tpm-aik-v1\", $provider)\n"
+    "$key.SetProperty([System.Security.Cryptography.CngProperty]::new(\"PCP_TPM12_IDACTIVATION\", $blob, [System.Security.Cryptography.CngPropertyOptions]::None))\n"
+    "$secret = $key.GetProperty(\"PCP_TPM12_IDACTIVATION\", [System.Security.Cryptography.CngPropertyOptions]::None).GetValue()\n"
+    "Write-Output ([Convert]::ToBase64String($secret))\n";
+
+#define TPM_ACTIVATION_ENV L"ROTK_TPM_ACTIVATION"
+
+/* The server's credential, answered by the TPM (see tpm_activate). */
+static int answer_activation(const char *cmdline, const char *command) {
+    static uint8_t blob[2048];
+    static wchar_t encoded[4096];
+    static char answer[256];
+    char why[512] = "", note[600];
+    DWORD chars, written = 0;
+    long length;
+    chars = GetEnvironmentVariableW(TPM_ACTIVATION_ENV, encoded, (DWORD)(sizeof encoded / sizeof encoded[0]));
+    length = (chars > 0 && chars < sizeof encoded / sizeof encoded[0]) ? b64_decode(encoded, blob, sizeof blob) : -1;
+    if (length <= 0) {
+        log_command("declined", cmdline, command, "tpm: no readable ROTK_TPM_ACTIVATION");
+        return EXIT_DECLINED;
+    }
+    if (!tpm_activate(blob, (size_t)length, answer, sizeof answer, why, sizeof why)) {
+        snprintf(note, sizeof note, "tpm: declined (credential activation): %s", why);
+        log_command("declined", cmdline, command, note);
+        return EXIT_DECLINED;
+    }
+    strcat(answer, "\n");
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), answer, (DWORD)strlen(answer), &written, NULL);
+    log_command("answered", cmdline, command, "tpm: credential activated by this machine's TPM");
+    return 0;
+}
+
+#define TPM_MESSAGE_ENV L"ROTK_TPM_MESSAGE_B64"
+#define TPM_MESSAGE_MAX 24576
+#define TPM_ANSWER_MAX 40960
+
+static int tpm_enabled(void) {
+    wchar_t flag[4];
+    return GetEnvironmentVariableW(L"SUL_TPM", flag, 4) > 0 && flag[0] == L'1';
+}
+
+/* Answers one of the two TPM commands: 0 if it did, EXIT_DECLINED if it
+ * recognized one but the TPM couldn't, -1 if `command` is neither. */
+static int answer_tpm(const char *cmdline, const char *command) {
+    static uint8_t message[TPM_MESSAGE_MAX];
+    static wchar_t encoded[TPM_MESSAGE_MAX * 2];
+    static char answer[TPM_ANSWER_MAX];
+    char why[512] = "", note[600];
+    int level1 = command_is(command, TPM_SIGN_SCRIPT);
+    int anchor = !level1 && command_is(command, TPM_ANCHOR_SCRIPT);
+    DWORD chars;
+    long length;
+    DWORD written = 0;
+    int ok;
+    if ((level1 || anchor) && !tpm_enabled()) {
+        log_command("declined", cmdline, command, "tpm: not enabled (rotk-launcher --tpm); behaving as a PC without a TPM");
+        return EXIT_DECLINED;
+    }
+    if (!level1 && !anchor) {
+        return command_is(command, TPM_ACTIVATE_SCRIPT) ? answer_activation(cmdline, command) : -1;
+    }
+
+    chars = GetEnvironmentVariableW(TPM_MESSAGE_ENV, encoded, (DWORD)(sizeof encoded / sizeof encoded[0]));
+    length = (chars > 0 && chars < sizeof encoded / sizeof encoded[0]) ? b64_decode(encoded, message, sizeof message) : -1;
+    if (length <= 0) {
+        log_command("declined", cmdline, command, "tpm: no readable ROTK_TPM_MESSAGE_B64 (the app always sends one)");
+        return EXIT_DECLINED;
+    }
+    ok = level1 ? tpm_level1_proof(message, (size_t)length, answer, sizeof answer, why, sizeof why)
+                : tpm_anchor_json(message, (size_t)length, answer, sizeof answer, why, sizeof why);
+    if (!ok) {
+        snprintf(note, sizeof note, "tpm: declined (%s): %s", level1 ? "level 1 proof" : "anchor", why);
+        log_command("declined", cmdline, command, note);
+        return EXIT_DECLINED;
+    }
+    strcat(answer, "\n");
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), answer, (DWORD)strlen(answer), &written, NULL);
+    snprintf(note, sizeof note, "tpm: %s answered with this machine's TPM (%ld-byte message)",
+             level1 ? "level 1 proof" : "anchor", length);
+    log_command("answered", cmdline, command, note);
+    return 0;
+}
+
 int wmain(int argc, wchar_t **argv) {
     const wchar_t *command_line;
     char *cmdline, *text;
@@ -889,6 +1367,11 @@ int wmain(int argc, wchar_t **argv) {
     int encoded;
 
     if (argc >= 3 && wcscmp(argv[1], POPUP_FLAG) == 0) return show_error_popup(argv[2]);
+    if (argc == 2 && wcscmp(argv[1], PREPARE_FLAG) == 0) {
+        if (tpm_prepare(why, sizeof why)) return 0;
+        fprintf(stderr, "tpm prepare failed: %s\n", why);
+        return EXIT_DECLINED;
+    }
 
     command_line = GetCommandLineW();
     cmdline = (char *)calloc(wcslen(command_line) * 4 + 8, 1);
@@ -898,6 +1381,15 @@ int wmain(int argc, wchar_t **argv) {
 
     if (text && !encoded) {
         int code = answer_instance_check(cmdline, text);
+        if (code >= 0) {
+            free(text);
+            free(cmdline);
+            return code;
+        }
+    }
+
+    if (text && !encoded) {
+        int code = answer_tpm(cmdline, text);
         if (code >= 0) {
             free(text);
             free(cmdline);
@@ -922,6 +1414,15 @@ int wmain(int argc, wchar_t **argv) {
             free(text);
             free(cmdline);
             return 0;
+        }
+    }
+
+    if (text && encoded) {
+        int code = answer_diagnostic(cmdline, text);
+        if (code >= 0) {
+            free(text);
+            free(cmdline);
+            return code;
         }
     }
 

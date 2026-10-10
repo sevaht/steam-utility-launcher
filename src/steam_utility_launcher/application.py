@@ -199,6 +199,26 @@ def _build_parser() -> argparse.ArgumentParser:
             " newer release only triggers a log warning."
         ),
     )
+    rotk_launcher_parser.add_argument(
+        "--tpm",
+        action="store_true",
+        help=(
+            "Opt in to TPM attestation: the PowerShell stand-in answers ROTK"
+            " Launcher's TPM proofs with this machine's real TPM. Off by"
+            " default, which behaves exactly like a PC without a TPM."
+        ),
+    )
+    rotk_launcher_parser.add_argument(
+        "--tpm-endorsement",
+        action="store_true",
+        help=(
+            "Opt in to the TPM's endorsement-key extras: send the EK"
+            " certificate chain (fetched once from the TPM maker, AMD only)"
+            " and let the TPM perform the server's credential activation."
+            " Implies --tpm. Off by default; only useful if the server starts"
+            " requiring it."
+        ),
+    )
     zemu_parser = subparsers.add_parser(
         "zemu",
         help=(
@@ -220,8 +240,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-configure",
         action="store_true",
         help=(
-            "Don't touch ZEmu Launcher's settings; choose the Wine/Proton"
-            " runtime in its own Properties screen instead."
+            "Don't touch ZEmu Launcher's settings. Without this, its runtime"
+            " follows the Proton used for Z1 Battle Royale; use this to pick"
+            " one in ZEmu's own Properties screen instead."
         ),
     )
     zemu_parser.add_argument(
@@ -237,13 +258,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "enable-hwid-access",
         help=(
             "Make the firmware serial numbers ROTK's hardware check reads"
-            " readable by your user (one-time; uses sudo)."
+            " readable by your user, and let your user use the TPM (one-time;"
+            " uses sudo)."
         ),
     )
     hwid_access_parser.add_argument(
         "--disable",
         action="store_true",
-        help="Undo it: make those files root-only again.",
+        help="Undo it: make those files root-only again and remove the TPM rule.",
     )
     hwid_access_parser.add_argument(
         "-y",
@@ -255,13 +277,15 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _launch_preset(
+def _launch_preset(  # noqa: PLR0913
     mode: str,
     steam: Steam | None,
     *,
     force: bool,
     configure: bool = True,
     proton: Path | None = None,
+    tpm: bool = False,
+    tpm_endorsement: bool = False,
 ) -> int:
     if mode == "hitman-peacock":
         return hitman_peacock.launch(steam=steam)
@@ -270,7 +294,9 @@ def _launch_preset(
     if mode == "silky-souls":
         return silky_souls.launch(steam=steam)
     if mode == "rotk-launcher":
-        return rotk_launcher.launch(steam=steam, force=force)
+        return rotk_launcher.launch(
+            steam=steam, force=force, tpm=tpm, tpm_endorsement=tpm_endorsement
+        )
     if mode == "zemu":
         return zemu.launch(
             steam=steam, force=force, configure=configure, proton=proton
@@ -331,5 +357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             force=getattr(args, "force", False),
             configure=not getattr(args, "no_configure", False),
             proton=Path(proton) if proton else None,
+            tpm=getattr(args, "tpm", False),
+            tpm_endorsement=getattr(args, "tpm_endorsement", False),
         )
     return 0

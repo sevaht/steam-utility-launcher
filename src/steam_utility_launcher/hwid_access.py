@@ -19,6 +19,10 @@ DMI_FILES = (
     "chassis_serial",
 )
 
+# The TPM resource manager devices (kept in sync with the root script).
+DEV_DIR = Path("/dev")
+TPM_DEVICE_PATTERN = "tpmrm[0-9]*"
+
 _ROOT_SCRIPT = "hwid_access_root.py"
 _SYSTEM_PYTHONS = (
     "/usr/bin/python3",
@@ -45,6 +49,45 @@ def restricted_files(directory: Path = DMI_DIR) -> list[Path]:
         for path in (directory / name for name in DMI_FILES)
         if path.exists() and not _readable(path)
     ]
+
+
+def inaccessible_tpm_devices(directory: Path = DEV_DIR) -> list[Path]:
+    """The TPM resource manager devices that exist but this user can't use."""
+    return [
+        path
+        for path in sorted(directory.glob(TPM_DEVICE_PATTERN))
+        if not os.access(path, os.R_OK | os.W_OK)
+    ]
+
+
+def has_usable_tpm(directory: Path = DEV_DIR) -> bool:
+    return any(
+        os.access(path, os.R_OK | os.W_OK)
+        for path in directory.glob(TPM_DEVICE_PATTERN)
+    )
+
+
+def tpm_problem() -> str | None:
+    """An error message if `--tpm` was asked for but this account can't use a
+    TPM, or None if it can.
+
+    TPM attestation is opt-in; once asked for it must work, so (unlike a
+    missing TPM on a PC that never asked) this is a reason not to start.
+    """
+    if has_usable_tpm():
+        return None
+    devices = inaccessible_tpm_devices()
+    if devices:
+        return (
+            f"Refusing to start with --tpm: the TPM ({', '.join(path.name for path in devices)})"
+            " can't be used by your user. Run `steam-utility-launcher"
+            " enable-hwid-access` once to allow it, then try again."
+        )
+    return (
+        "Refusing to start with --tpm: no TPM was found"
+        f" ({DEV_DIR / TPM_DEVICE_PATTERN}). Run without --tpm to behave"
+        " like a PC without a TPM."
+    )
 
 
 def access_problem() -> str | None:
@@ -104,8 +147,14 @@ def run(*, disable: bool = False, assume_yes: bool = False) -> int:
         )
         return 1
     action = "disable" if disable else "enable"
-    if not disable and not restricted_files():
-        print("Hardware identifiers are already readable; nothing to do.")
+    if (
+        not disable
+        and not restricted_files()
+        and not inaccessible_tpm_devices()
+    ):
+        print(
+            "Hardware identifiers and the TPM are already usable; nothing to do."
+        )
         return 0
     script = root_script_text()
     if not assume_yes and not _confirm(script, action):
@@ -126,11 +175,11 @@ def run(*, disable: bool = False, assume_yes: bool = False) -> int:
             "The privileged step failed (status %s).", result.returncode
         )
         return result.returncode
-    remaining = restricted_files()
+    remaining = [*restricted_files(), *inaccessible_tpm_devices()]
     if disable or not remaining:
         print("Done.")
         return 0
     logger.error(
-        "Still unreadable: %s", ", ".join(path.name for path in remaining)
+        "Still unusable: %s", ", ".join(path.name for path in remaining)
     )
     return 1

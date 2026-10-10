@@ -4,13 +4,16 @@ import hashlib
 import logging
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from steam_utility_launcher import (
+    game_watchdog,
     hwid_access,
     powershell_log,
+    tpm_setup,
     update_check,
     vc_runtime,
 )
@@ -33,6 +36,144 @@ _CHECKSUMS_ASSET_NAME = Path("SHA256SUMS.txt")
 _CHECKSUM_LINE_PART_COUNT = 2
 
 
+# Where the stand-in keeps the TPM-wrapped key blobs (see resources/tpm2.h).
+# On the host, so a Proton prefix reset doesn't change the keys the server
+# knows; the blobs only load on this machine's TPM.
+_TPM_DIR_ENV_VAR = "SUL_TPM_DIR"
+_TPM_ENV_VAR = "SUL_TPM"
+# Opt-in (--tpm-endorsement): without it the stand-in sends no EK certificates
+# and declines the credential activation.
+_TPM_ENDORSEMENT_ENV_VAR = "SUL_TPM_ENDORSEMENT"
+
+
+# Steam's overlay doesn't work with DXVK (which is what makes the game run
+# well): its preloaded library stalls the game's start-up, and its Vulkan
+# layer draws an FPS counter over the launcher's own window. So neither is
+# passed on: the layer is switched off and the library is dropped from
+# LD_PRELOAD (see _without_steam_overlay).
+_STEAM_OVERLAY_OFF = {"DISABLE_VK_LAYER_VALVE_steam_overlay_1": "1"}
+_OVERLAY_LIBRARY = "gameoverlayrenderer"
+
+# The game's own patch library sometimes suspends its main thread while Wine is
+# in the one-time window setup, and the game then hangs for good. Proton-ROTK
+# (a Proton build with a small Wine change) does that setup at process start
+# for the one program named here; other Proton builds ignore the setting.
+_EAGER_DESKTOP = {"PROTON_ROTK_EAGER_DESKTOP": "H1Z1.exe"}
+
+# Where the launcher keeps the game, and the FPS counter that stands in for the
+# overlay's. DXVK reads dxvk.conf from the working directory of each process,
+# so putting it with the game shows the counter in the game and not in the
+# launcher. An existing file is never touched, so it can be edited (or its
+# `dxvk.hud` emptied to turn the counter off).
+_GAME_DIRECTORY = ("drive_c", "Games", "ROTK")
+_DXVK_CONFIG_NAME = "dxvk.conf"
+_DXVK_CONFIG = "dxvk.hud = fps\n"
+
+
+def _ensure_fps_counter(prefix: Path) -> None:
+    game_directory = prefix.joinpath(*_GAME_DIRECTORY)
+    config = game_directory / _DXVK_CONFIG_NAME
+    if not game_directory.is_dir() or config.exists():
+        return
+    try:
+        config.write_text(_DXVK_CONFIG)
+    except OSError as error:
+        logger.warning("Could not set up the FPS counter: %s", error)
+        return
+    logger.info("Added an FPS counter for the game: %s", config)
+
+
+def _without_steam_overlay(env: dict[str, str]) -> None:
+    """Drops Steam's overlay library from LD_PRELOAD, keeping anything else."""
+    preload = env.get("LD_PRELOAD")
+    if preload is None:
+        return
+    kept = [
+        entry
+        for entry in re.split(r"[\s:]+", preload)
+        if entry and _OVERLAY_LIBRARY not in entry
+    ]
+    if kept:
+        env["LD_PRELOAD"] = ":".join(kept)
+    else:
+        del env["LD_PRELOAD"]
+
+
+def _wait_for_game(child: subprocess.Popen[bytes], prefix: Path) -> int:
+    """Waits for the launcher, stopping a game that hangs while starting."""
+    watchdog = game_watchdog.StartupWatchdog(prefix)
+    while True:
+        try:
+            return child.wait(timeout=game_watchdog.POLL_SECONDS)
+        except subprocess.TimeoutExpired:
+            watchdog.check()
+
+
+def _tpm_directory() -> Path:
+    directory = XDG_DATA_ROOT / "tpm"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return directory
+
+
+_STAND_IN_WINE_PATH = (
+    r"C:\windows\system32\WindowsPowerShell\v1.0\powershell.exe"
+)
+_PREPARE_FLAG = "--sul-tpm-prepare"
+
+
+def _tpm_environment(*, tpm: bool, endorsement: bool) -> dict[str, str]:
+    """Nothing is set unless asked for, so the stand-in declines the TPM
+    commands as a PC without a TPM would."""
+    if not tpm:
+        return {}
+    environment = {
+        _TPM_ENV_VAR: "1",
+        _TPM_DIR_ENV_VAR: powershell_log.wine_path(_tpm_directory()),
+    }
+    if endorsement:
+        environment[_TPM_ENDORSEMENT_ENV_VAR] = "1"
+    return environment
+
+
+def _prepare_tpm(
+    *, steam: Steam | None, prefix: Path, endorsement: bool
+) -> bool:
+    """Has the stand-in create the TPM keys once and, for AMD TPMs with
+    `--tpm-endorsement`, saves the endorsement key certificate chain AMD
+    publishes. TPM attestation was asked for, so False (with the reason
+    logged) means the TPM doesn't work and the launch must not go on."""
+    directory = _tpm_directory()
+    try:
+        if tpm_setup.needs_preparing(directory):
+            code = (
+                _run_in_context(
+                    steam,
+                    prefix,
+                    [_STAND_IN_WINE_PATH, _PREPARE_FLAG],
+                    disable_powershell=False,
+                    extra_env={
+                        _TPM_DIR_ENV_VAR: powershell_log.wine_path(directory)
+                    },
+                )
+                .start()
+                .wait()
+            )
+            if code != 0:
+                logger.error(
+                    "Refusing to start with --tpm: the TPM could not be set"
+                    " up (exit status %d; the reason is printed just above)."
+                    " Run without --tpm to behave like a PC without a TPM.",
+                    code,
+                )
+                return False
+        if endorsement:
+            tpm_setup.ensure_certificates(directory)
+    except OSError:
+        logger.exception("Refusing to start with --tpm")
+        return False
+    return True
+
+
 def _require_steam(steam: Steam | None) -> Steam:
     if not steam:
         msg = "steam context must be provided on linux!"
@@ -49,17 +190,18 @@ def _resolve_app_path(steam: Steam | None) -> tuple[Path | None, Path]:
     return None, program_files / "ROTK Launcher" / "ROTK Launcher.exe"
 
 
-def _run_in_context(
+def _run_in_context(  # noqa: PLR0913
     steam: Steam | None,
     prefix: Path | None,
     command_line: list[str],
     *,
     disable_powershell: bool = True,
     extra_env: dict[str, str] | None = None,
+    as_game: bool = False,
 ) -> Process:
     if prefix is not None:
         process = _require_steam(steam).process_in_prefix(
-            command_line, game_id=GAME_ID
+            command_line, game_id=GAME_ID, via_proton_script=as_game
         )
         if extra_env and process.env is not None:
             process.env.update(extra_env)
@@ -195,7 +337,14 @@ def _install_if_needed(
     logger.info('Installed ROTK Launcher "%s".', release.tag)
 
 
-def launch(*, steam: Steam | None = None, force: bool = False) -> int:
+def launch(
+    *,
+    steam: Steam | None = None,
+    force: bool = False,
+    tpm: bool = False,
+    tpm_endorsement: bool = False,
+) -> int:
+    tpm = tpm or tpm_endorsement
     prefix, app_path = _resolve_app_path(steam)
     if prefix is not None:
         # First, before anything is downloaded, installed or started: if the
@@ -203,6 +352,11 @@ def launch(*, steam: Steam | None = None, force: bool = False) -> int:
         problem = hwid_access.access_problem()
         if problem is not None:
             logger.error(problem)
+            return 1
+        # TPM attestation is opt-in; once asked for it has to work.
+        tpm_problem = hwid_access.tpm_problem() if tpm else None
+        if tpm_problem is not None:
+            logger.error(tpm_problem)
             return 1
     ps_log = powershell_log.path() if prefix is not None else None
     if ps_log is not None:
@@ -227,15 +381,30 @@ def launch(*, steam: Steam | None = None, force: bool = False) -> int:
     # also answers the installer checks the app's in-app updater makes, so
     # the DLL override that disables PowerShell isn't used here.
     ensure_wine_patches(prefix)
+    _ensure_fps_counter(prefix)
+    if tpm and not _prepare_tpm(
+        steam=steam, prefix=prefix, endorsement=tpm_endorsement
+    ):
+        return 1
     logged_before = powershell_log.size(ps_log)
-    child = _run_in_context(
+    process = _run_in_context(
         steam,
         prefix,
         [str(app_path)],
         disable_powershell=False,
-        extra_env={powershell_log.ENV_VAR: powershell_log.wine_path(ps_log)},
-    ).start()
-    return_code = child.wait()
+        # ROTK Launcher is the game itself (it starts H1Z1.exe), so it runs
+        # exactly as Steam would run the game: through Proton's own script.
+        as_game=True,
+        extra_env={
+            powershell_log.ENV_VAR: powershell_log.wine_path(ps_log),
+            **_STEAM_OVERLAY_OFF,
+            **_EAGER_DESKTOP,
+            **_tpm_environment(tpm=tpm, endorsement=tpm_endorsement),
+        },
+    )
+    if process.env is not None:
+        _without_steam_overlay(process.env)
+    return_code = _wait_for_game(process.start(), prefix)
     # The stand-in refuses (and logs) any hardware-ID command it doesn't
     # recognize; say so here too, where the terminal output is.
     powershell_log.report_unrecognized(ps_log, logged_before)

@@ -9,6 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 source_file=src/steam_utility_launcher/resources/wine_powershell_hwid.c
+tpm_source=src/steam_utility_launcher/resources/tpm2.c
 declare -A compilers=(
     [i686]=i686-w64-mingw32-gcc
     [x86_64]=x86_64-w64-mingw32-gcc
@@ -20,6 +21,6 @@ for arch in "${!compilers[@]}"; do
         exit 1
     fi
     output="src/steam_utility_launcher/resources/powershell_hwid_${arch}.exe"
-    "$compiler" -municode -mconsole -O2 -Wall -Wextra -s -o "$output" "$source_file"
+    "$compiler" -municode -mconsole -O2 -Wall -Wextra -s -o "$output" "$source_file" "$tpm_source" -lole32 -loleaut32 -lwbemuuid -lbcrypt
     echo "Built $output"
 done
