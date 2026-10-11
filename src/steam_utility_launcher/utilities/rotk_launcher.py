@@ -4,15 +4,14 @@ import hashlib
 import logging
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from steam_utility_launcher import (
-    game_watchdog,
     hwid_access,
     powershell_log,
+    svt_proton,
     tpm_setup,
     update_check,
     vc_runtime,
@@ -31,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 # Z1 Battle Royale, formerly H1Z1; ROTK Launcher is run in its Proton prefix.
 GAME_ID = "433850"
+# Waives the requirement that the game's Proton be SVT-Proton.
+ALLOW_ANY_PROTON_FLAG = "--allow-any-proton"
 _ASSET_PATTERN = re.compile(r"ROTK-Launcher-[0-9]+(\.[0-9]+)*-x64\.exe")
 _CHECKSUMS_ASSET_NAME = Path("SHA256SUMS.txt")
 _CHECKSUM_LINE_PART_COUNT = 2
@@ -54,33 +55,47 @@ _TPM_ENDORSEMENT_ENV_VAR = "SUL_TPM_ENDORSEMENT"
 _STEAM_OVERLAY_OFF = {"DISABLE_VK_LAYER_VALVE_steam_overlay_1": "1"}
 _OVERLAY_LIBRARY = "gameoverlayrenderer"
 
-# The game's own patch library sometimes suspends its main thread while Wine is
-# in the one-time window setup, and the game then hangs for good. Proton-ROTK
-# (a Proton build with a small Wine change) does that setup at process start
-# for the one program named here; other Proton builds ignore the setting.
-_EAGER_DESKTOP = {"PROTON_ROTK_EAGER_DESKTOP": "H1Z1.exe"}
+# ROTK's patch library (rotkc.dll, loaded into the game by the ROTK launcher's
+# game files) sometimes suspends the game's main thread while Wine is in the
+# one-time window setup, and the game then hangs for good. SVT-Proton (a
+# Proton build with a small Wine change) does that setup at process start for
+# the program(s) named here; other Proton builds ignore the setting.
+_GAME_EXECUTABLE = "H1Z1.exe"
+_EAGER_DESKTOP = {"PROTON_SVT_EAGER_DESKTOP": _GAME_EXECUTABLE}
 
-# Where the launcher keeps the game, and the FPS counter that stands in for the
-# overlay's. DXVK reads dxvk.conf from the working directory of each process,
-# so putting it with the game shows the counter in the game and not in the
-# launcher. An existing file is never touched, so it can be edited (or its
-# `dxvk.hud` emptied to turn the counter off).
-_GAME_DIRECTORY = ("drive_c", "Games", "ROTK")
-_DXVK_CONFIG_NAME = "dxvk.conf"
-_DXVK_CONFIG = "dxvk.hud = fps\n"
+# DXVK's own overlay stands in for Steam's (see above); it is only shown when
+# asked for with --hud or --default-hud. The value is what DXVK_HUD takes: a
+# comma-separated list of items (fps, gpuload, frametimes, memory, ...) and of
+# options written name=value (scale=1.5, opacity=0.8). It is passed in
+# DXVK_CONFIG, in a section for the game's executable: every DXVK process
+# gets the variable (the game inherits the launcher's environment), but DXVK
+# only applies a section to the program it names, so the launcher's own window
+# doesn't show the overlay. (A DXVK_HUD in the environment would show it
+# everywhere, and takes precedence over this.)
+_DXVK_CONFIG_ENV_VAR = "DXVK_CONFIG"
+# DXVK splits that variable at ';', and ends a value at whitespace or a quote.
+_HUD_FORBIDDEN = re.compile(r'[\s;"\[\]]')
+# The overlay this tool's author prefers, for --default-hud.
+DEFAULT_HUD = "fps,gpuload,scale=0.75,opacity=0.7"
 
 
-def _ensure_fps_counter(prefix: Path) -> None:
-    game_directory = prefix.joinpath(*_GAME_DIRECTORY)
-    config = game_directory / _DXVK_CONFIG_NAME
-    if not game_directory.is_dir() or config.exists():
-        return
-    try:
-        config.write_text(_DXVK_CONFIG)
-    except OSError as error:
-        logger.warning("Could not set up the FPS counter: %s", error)
-        return
-    logger.info("Added an FPS counter for the game: %s", config)
+def hud_value(text: str) -> str:
+    """Checks an overlay setting for --hud, which DXVK_CONFIG can't carry if
+    it has a space, quote, bracket or ';' in it."""
+    if not text or _HUD_FORBIDDEN.search(text):
+        msg = (
+            "expected DXVK_HUD items without spaces, quotes, brackets or"
+            f" ';', such as {DEFAULT_HUD},scale=1.5,opacity=0.8"
+        )
+        raise ValueError(msg)
+    return text
+
+
+def _hud_config(hud: str, existing: str) -> str:
+    """The DXVK_CONFIG value that turns the overlay on in the game only,
+    after whatever DXVK_CONFIG the environment already had."""
+    section = f"[{_GAME_EXECUTABLE}];dxvk.hud={hud}"
+    return f"{existing};{section}" if existing else section
 
 
 def _without_steam_overlay(env: dict[str, str]) -> None:
@@ -97,16 +112,6 @@ def _without_steam_overlay(env: dict[str, str]) -> None:
         env["LD_PRELOAD"] = ":".join(kept)
     else:
         del env["LD_PRELOAD"]
-
-
-def _wait_for_game(child: subprocess.Popen[bytes], prefix: Path) -> int:
-    """Waits for the launcher, stopping a game that hangs while starting."""
-    watchdog = game_watchdog.StartupWatchdog(prefix)
-    while True:
-        try:
-            return child.wait(timeout=game_watchdog.POLL_SECONDS)
-        except subprocess.TimeoutExpired:
-            watchdog.check()
 
 
 def _tpm_directory() -> Path:
@@ -337,17 +342,30 @@ def _install_if_needed(
     logger.info('Installed ROTK Launcher "%s".', release.tag)
 
 
-def launch(
+def launch(  # noqa: PLR0913
     *,
     steam: Steam | None = None,
     force: bool = False,
     tpm: bool = False,
     tpm_endorsement: bool = False,
+    allow_any_proton: bool = False,
+    hud: str | None = None,
 ) -> int:
     tpm = tpm or tpm_endorsement
     prefix, app_path = _resolve_app_path(steam)
     if prefix is not None:
-        # First, before anything is downloaded, installed or started: if the
+        # The game has to run on SVT-Proton, which has the Wine fixes it needs
+        # to start reliably, unless that is waived. Nothing else is done
+        # before this: nothing is downloaded, installed or started.
+        if not svt_proton.ensure_game_uses(
+            _require_steam(steam),
+            GAME_ID,
+            game_name="Z1 Battle Royale",
+            override_flag=ALLOW_ANY_PROTON_FLAG,
+            allow_any=allow_any_proton,
+        ):
+            return 1
+        # Next, before anything is downloaded, installed or started: if the
         # hardware check can't be answered completely, don't go on at all.
         problem = hwid_access.access_problem()
         if problem is not None:
@@ -381,7 +399,6 @@ def launch(
     # also answers the installer checks the app's in-app updater makes, so
     # the DLL override that disables PowerShell isn't used here.
     ensure_wine_patches(prefix)
-    _ensure_fps_counter(prefix)
     if tpm and not _prepare_tpm(
         steam=steam, prefix=prefix, endorsement=tpm_endorsement
     ):
@@ -399,12 +416,21 @@ def launch(
             powershell_log.ENV_VAR: powershell_log.wine_path(ps_log),
             **_STEAM_OVERLAY_OFF,
             **_EAGER_DESKTOP,
+            **(
+                {
+                    _DXVK_CONFIG_ENV_VAR: _hud_config(
+                        hud, os.environ.get(_DXVK_CONFIG_ENV_VAR, "")
+                    )
+                }
+                if hud
+                else {}
+            ),
             **_tpm_environment(tpm=tpm, endorsement=tpm_endorsement),
         },
     )
     if process.env is not None:
         _without_steam_overlay(process.env)
-    return_code = _wait_for_game(process.start(), prefix)
+    return_code = process.start().wait()
     # The stand-in refuses (and logs) any hardware-ID command it doesn't
     # recognize; say so here too, where the terminal output is.
     powershell_log.report_unrecognized(ps_log, logged_before)

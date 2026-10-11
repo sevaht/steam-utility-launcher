@@ -57,6 +57,35 @@ steam-utility-launcher rotk-launcher
 > needs the game's Proton prefix to exist (i.e. the game has been launched
 > at least once before).
 
+> **Linux note:** the game has to be set to [SVT-Proton](#svt-proton) in
+> Steam. `rotk-launcher` refuses to start otherwise, because on other Protons
+> the game can hang while starting. Install it with
+> `steam-utility-launcher svt-proton`. To run with whatever Proton Steam uses
+> for the game anyway, add `--allow-any-proton`.
+
+**Overlay.** Steam's overlay is turned off for the game (it doesn't work with
+DXVK, which the game runs on), so there's no frame counter unless you ask for
+DXVK's own overlay:
+
+```bash
+steam-utility-launcher rotk-launcher --default-hud
+steam-utility-launcher rotk-launcher --hud fps,gpuload,scale=1.5,opacity=0.8
+```
+
+`--hud` takes what DXVK's `DXVK_HUD` variable takes and passes it on as it
+is: a comma-separated list of items (`fps`, `gpuload`, `frametimes`, `memory`,
+`devinfo`, `pipelines`, ...) and of `name=value` options, which is how scale
+(0.25 to 4) and opacity (0.1 to 1) are set. It can't contain spaces, quotes,
+brackets or `;`. `--default-hud` is the same with the author's preferred settings
+(`fps,gpuload,scale=0.75,opacity=0.7`). The two can't be combined.
+
+The overlay is shown in the game only, not over the launcher's own window. It
+is passed as `DXVK_CONFIG="[H1Z1.exe];dxvk.hud=<items>"`: every DXVK process
+gets the variable, but DXVK applies a section only to the program it names. No
+file is written. A `DXVK_CONFIG` already in your environment is kept (the
+overlay is added after it). A `DXVK_HUD` in your environment takes precedence
+over all of this and shows the overlay in every window; avoid setting it.
+
 If ROTK Launcher isn't installed yet, this downloads the latest release,
 verifies its checksum against the release's `SHA256SUMS.txt`, and runs the
 installer silently inside the game's Proton prefix before launching the app.
@@ -177,6 +206,45 @@ prints that path at the start of every run. Each record has a verdict:
 Two environment variables exist for testing: `SUL_POWERSHELL_LOG` (log file,
 set by `rotk-launcher`; default `%TEMP%\sul-powershell-commands.log`) and
 `SUL_POWERSHELL_NO_POPUP` (suppress the message box).
+
+#### SVT-Proton
+
+[SVT-Proton](https://github.com/sevaht/SVT-Proton) is Valve's Proton with a
+few fixes, under the same version number (SVT-Proton `11.0-2e` is Proton
+`11.0-2e` plus the fixes). The ones ROTK Launcher and Z1 Battle Royale depend
+on:
+
+- the game no longer hangs at start-up: ROTK's patch library can suspend the
+  game's main thread while Wine is doing its one-time window setup, and
+  SVT-Proton does that setup first (`rotk-launcher` asks for it with
+  `PROTON_SVT_EAGER_DESKTOP`);
+- the launcher's frameless window is sized correctly (no blank strip, no thick
+  borders, no window-manager title bar it never asked for), and dragging it by
+  its own title bar no longer leaves the window manager stuck in a move.
+
+```bash
+steam-utility-launcher svt-proton
+```
+
+This installs the latest release into Steam's folder for tools you add
+yourself (`~/.local/share/Steam/compatibilitytools.d/SVT-Proton-11.0`) and
+updates it to the latest release when one is out; run it again whenever
+`rotk-launcher` says an update is available (that check is made at most once
+a day and only logs a warning). The download is checked against the release's
+`SHA256SUMS.txt`, unpacked beside the destination, and swapped in as a whole,
+so a failed download or update leaves what is installed alone. `--force`
+reinstalls even if it is up to date. There is only an x86_64 build, the same as
+Valve's Proton.
+
+Then restart Steam and, for Z1 Battle Royale, choose **SVT-Proton-11.0** under
+Properties > Compatibility. This tool doesn't change that choice for you:
+Steam keeps its configuration in memory and writes it back when it exits.
+Close the game before updating it.
+
+Unless the game is set to SVT-Proton, `rotk-launcher` says why and exits
+without starting or installing anything. `--allow-any-proton` skips that
+requirement and runs with whatever Proton Steam uses for the game, as it does
+for the other tools (the game may hang while starting).
 
 #### Visual C++ runtime
 
@@ -346,7 +414,8 @@ library.
 
 ## Installed tool locations
 
-Tools are downloaded to:
+(SVT-Proton is the exception: it goes where Steam looks for tools, see
+[SVT-Proton](#svt-proton).) Tools are downloaded to:
 
 ```
 ~/.local/share/steam-utility-launcher/<ToolName>/

@@ -232,7 +232,13 @@ class CompatibilityTool:
     binary_argument_template: list[str]
 
     def is_proton(self) -> bool:
-        return _PROTON_PATTERN.match(self.internal_name) is not None
+        # By name anywhere in it (Proton-ROTK, GE-Proton10-4, SVT-Proton-11.0,
+        # not only names that start with it), or by being run through a
+        # `proton` script, which is what every Proton build ships.
+        return (
+            _PROTON_PATTERN.search(self.internal_name) is not None
+            or self.binary_path.name == "proton"
+        )
 
     @classmethod
     def from_toolmanifest_vdf(
@@ -335,6 +341,12 @@ class SteamLocation:
     @property
     def steamapps(self) -> Path:
         return self.root / "steamapps"
+
+    @property
+    def compatibility_tools_dir(self) -> Path:
+        """Where tools installed by the user go; Steam lists them after a
+        restart."""
+        return self.root / "compatibilitytools.d"
 
     @property
     def config_vdf(self) -> Path:
@@ -520,6 +532,44 @@ class Steam:
             drive_s.unlink()
         drive_s.symlink_to(target)
 
+    def matching_compatibility_tools(
+        self, tool_name: str
+    ) -> list[CompatibilityTool]:
+        """The installed tools a name from Steam's configuration refers to:
+        an exact match, else one that matches ignoring case and punctuation,
+        else one whose name starts with it."""
+        matched_tools = [
+            tool
+            for tool in self.compatibility_tools
+            if tool.internal_name == tool_name
+        ]
+        if not matched_tools:
+            normalized_tool_name = _normalize_tool_name(tool_name)
+            matched_tools = [
+                tool
+                for tool in self.compatibility_tools
+                if _normalize_tool_name(tool.internal_name)
+                == normalized_tool_name
+            ]
+        if not matched_tools:
+            matched_tools = [
+                tool
+                for tool in self.compatibility_tools
+                if _normalize_tool_name(tool.internal_name).startswith(
+                    _normalize_tool_name(tool_name)
+                )
+            ]
+        return matched_tools
+
+    def game_tool(self, game_id: str) -> CompatibilityTool | None:
+        """The tool Steam runs the game with, if it names exactly one tool
+        that is installed."""
+        tool_name = self.game_compatibility_tool(game_id)
+        if not tool_name:
+            return None
+        matched_tools = self.matching_compatibility_tools(tool_name)
+        return matched_tools[0] if len(matched_tools) == 1 else None
+
     def process_in_prefix(
         self,
         command_line: list[str],
@@ -551,27 +601,7 @@ class Steam:
         else:
             tool_name = self.game_compatibility_tool(game_id)
             if tool_name:
-                matched_tools = [
-                    tool
-                    for tool in self.compatibility_tools
-                    if tool.internal_name == tool_name
-                ]
-                if not matched_tools:
-                    normalized_tool_name = _normalize_tool_name(tool_name)
-                    matched_tools = [
-                        tool
-                        for tool in self.compatibility_tools
-                        if _normalize_tool_name(tool.internal_name)
-                        == normalized_tool_name
-                    ]
-                if not matched_tools:
-                    matched_tools = [
-                        tool
-                        for tool in self.compatibility_tools
-                        if _normalize_tool_name(tool.internal_name).startswith(
-                            _normalize_tool_name(tool_name)
-                        )
-                    ]
+                matched_tools = self.matching_compatibility_tools(tool_name)
                 if not matched_tools:
                     msg = f"No compatibility tools matched: {tool_name}"
                     raise RuntimeError(msg)

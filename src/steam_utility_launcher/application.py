@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import tarfile
 from dataclasses import KW_ONLY, dataclass
 from logging import Handler
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import hwid_access
+from . import hwid_access, svt_proton
 from .steam import Steam
 from .utilities import (
     dsr_gadget,
@@ -114,6 +115,13 @@ def _resolve_game_id(args: argparse.Namespace) -> str:
     return str(args.game_id)
 
 
+def _hud_argument(text: str) -> str:
+    try:
+        return rotk_launcher.hud_value(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -200,6 +208,38 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rotk_launcher_parser.add_argument(
+        rotk_launcher.ALLOW_ANY_PROTON_FLAG,
+        action="store_true",
+        help=(
+            "Run with whatever Proton Steam uses for Z1 Battle Royale even if"
+            " it isn't SVT-Proton. Without this, ROTK Launcher refuses to"
+            " start unless the game is set to SVT-Proton (see the"
+            " svt-proton command), since the game can hang while starting"
+            " on other Protons."
+        ),
+    )
+    hud_group = rotk_launcher_parser.add_mutually_exclusive_group()
+    hud_group.add_argument(
+        "--hud",
+        metavar="ITEMS",
+        type=_hud_argument,
+        help=(
+            "Show DXVK's overlay in the game: what DXVK_HUD takes, a"
+            " comma-separated list of items and name=value options, without"
+            " spaces, such as fps,gpuload,scale=1.5,opacity=0.8 (items"
+            " include fps, gpuload, frametimes, memory, devinfo; scale is"
+            " 0.25 to 4, opacity 0.1 to 1)."
+        ),
+    )
+    hud_group.add_argument(
+        "--default-hud",
+        action="store_true",
+        help=(
+            "Show DXVK's overlay with the preferred set of items, which is"
+            f" {rotk_launcher.DEFAULT_HUD}."
+        ),
+    )
+    rotk_launcher_parser.add_argument(
         "--tpm",
         action="store_true",
         help=(
@@ -218,6 +258,18 @@ def _build_parser() -> argparse.ArgumentParser:
             " Implies --tpm. Off by default; only useful if the server starts"
             " requiring it."
         ),
+    )
+    svt_proton_parser = subparsers.add_parser(
+        "svt-proton",
+        help=(
+            "Install SVT-Proton, the Proton build ROTK Launcher needs, in"
+            " Steam, or update it to the latest release."
+        ),
+    )
+    svt_proton_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Install the latest release even if it is already installed.",
     )
     zemu_parser = subparsers.add_parser(
         "zemu",
@@ -286,6 +338,8 @@ def _launch_preset(  # noqa: PLR0913
     proton: Path | None = None,
     tpm: bool = False,
     tpm_endorsement: bool = False,
+    allow_any_proton: bool = False,
+    hud: str | None = None,
 ) -> int:
     if mode == "hitman-peacock":
         return hitman_peacock.launch(steam=steam)
@@ -295,13 +349,30 @@ def _launch_preset(  # noqa: PLR0913
         return silky_souls.launch(steam=steam)
     if mode == "rotk-launcher":
         return rotk_launcher.launch(
-            steam=steam, force=force, tpm=tpm, tpm_endorsement=tpm_endorsement
+            steam=steam,
+            force=force,
+            tpm=tpm,
+            tpm_endorsement=tpm_endorsement,
+            allow_any_proton=allow_any_proton,
+            hud=hud,
         )
     if mode == "zemu":
         return zemu.launch(
             steam=steam, force=force, configure=configure, proton=proton
         )
     raise NotImplementedError
+
+
+def _install_svt_proton(*, force: bool) -> int:
+    if sys.platform != "linux":
+        logger.error("SVT-Proton is for Steam on Linux.")
+        return 1
+    try:
+        svt_proton.install(Steam.from_detection(), force=force)
+    except (OSError, RuntimeError, ValueError, tarfile.TarError) as error:
+        logger.error("Could not install SVT-Proton: %s", error)  # noqa: TRY400
+        return 1
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -337,6 +408,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return return_code
     elif args.mode == "enable-hwid-access":
         return hwid_access.run(disable=args.disable, assume_yes=args.yes)
+    elif args.mode == "svt-proton":
+        return _install_svt_proton(force=args.force)
     elif args.mode == "prefix-path":
         steam = Steam.from_detection()
         game_id = _resolve_game_id(args)
@@ -359,5 +432,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             proton=Path(proton) if proton else None,
             tpm=getattr(args, "tpm", False),
             tpm_endorsement=getattr(args, "tpm_endorsement", False),
+            allow_any_proton=getattr(args, "allow_any_proton", False),
+            hud=(
+                rotk_launcher.DEFAULT_HUD
+                if getattr(args, "default_hud", False)
+                else getattr(args, "hud", None)
+            ),
         )
     return 0

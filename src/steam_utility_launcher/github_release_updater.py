@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import stat
+from contextlib import contextmanager
 from dataclasses import KW_ONLY, dataclass, field
 from email.message import Message
 from enum import Enum, auto, unique
@@ -16,14 +18,15 @@ from pathlib import Path
 from re import Pattern, fullmatch
 from shutil import copytree, move, rmtree
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from zipfile import ZipFile
 
 if TYPE_CHECKING:
     import subprocess
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
+    from http.client import HTTPResponse
     from types import TracebackType
 
     from .steam import Process
@@ -32,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 HTTP_STATUS_OK = 200
 HTTP_STATUS_NOT_FOUND = 404
+_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 def _validated_https_url(url: str) -> tuple[str, str]:
@@ -48,33 +52,54 @@ def _validated_https_url(url: str) -> tuple[str, str]:
     return parsed.netloc, path
 
 
-def https_get(url: str) -> tuple[int, bytes]:
+@contextmanager
+def _https_response(url: str) -> Iterator[HTTPResponse]:
+    """The response to a GET of the URL, after following redirects."""
     current_url = url
     for _ in range(5):
         host, path = _validated_https_url(current_url)
         connection = HTTPSConnection(host)
-        connection.request(
-            "GET",
-            path,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "steam-utility-launcher",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        response = connection.getresponse()
         try:
+            connection.request(
+                "GET",
+                path,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "steam-utility-launcher",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+            response = connection.getresponse()
             if response.status in {301, 302, 303, 307, 308}:
                 location = response.getheader("Location")
-                if not location:
-                    return response.status, response.read()
-                current_url = location
-                continue
-            return response.status, response.read()
+                if location:
+                    current_url = location
+                    continue
+            yield response
+            return
         finally:
             connection.close()
     msg = f"Too many redirects while fetching URL: {url}"
     raise RuntimeError(msg)
+
+
+def https_get(url: str) -> tuple[int, bytes]:
+    with _https_response(url) as response:
+        return response.status, response.read()
+
+
+def https_download(url: str, destination: Path) -> str:
+    """Saves the URL to a file without holding it in memory, and returns the
+    SHA-256 of what was saved (as hex)."""
+    digest = hashlib.sha256()
+    with _https_response(url) as response:
+        if response.status != HTTP_STATUS_OK:
+            _raise_http_status_error(url, response.status)
+        with destination.open("wb") as output:
+            while chunk := response.read(_DOWNLOAD_CHUNK_BYTES):
+                digest.update(chunk)
+                output.write(chunk)
+    return digest.hexdigest()
 
 
 def _raise_http_status_error(url: str, status_code: int) -> None:
@@ -105,6 +130,16 @@ class Release:
         return result
 
 
+def _release_from_json(data: dict[str, Any]) -> Release:
+    return Release(
+        tag=data["tag_name"],
+        asset_urls={
+            Path(asset["name"]): asset["browser_download_url"]
+            for asset in data.get("assets", [])
+        },
+    )
+
+
 @dataclass
 class GitHubRepository:
     name: str
@@ -124,6 +159,18 @@ class GitHubRepository:
         endpoint = "latest" if not tag else f"tags/{tag}"
         return f"{self.api_url()}/releases/{endpoint}"
 
+    def list_releases(self, *, limit: int = 30) -> list[Release]:
+        """The published (not draft, not pre-release) releases, newest first."""
+        url = f"{self.api_url()}/releases?per_page={limit}"
+        status, body = https_get(url)
+        if status != HTTP_STATUS_OK:
+            _raise_http_status_error(url, status)
+        return [
+            _release_from_json(data)
+            for data in json.loads(body.decode())
+            if not data.get("draft") and not data.get("prerelease")
+        ]
+
     def get_release(self, tag: str = "") -> Release | None:
         url = self.api_release_url(tag=tag)
         try:
@@ -132,14 +179,7 @@ class GitHubRepository:
             for attempt in range(attempts):
                 response_status, body = https_get(url)
                 if response_status == HTTP_STATUS_OK:
-                    data = json.loads(body.decode())
-                    return Release(
-                        tag=data["tag_name"],
-                        asset_urls={
-                            Path(asset["name"]): asset["browser_download_url"]
-                            for asset in data.get("assets", [])
-                        },
-                    )
+                    return _release_from_json(json.loads(body.decode()))
                 logger.warning(
                     f"[attempt {attempt+1}/{attempts}]"
                     f" Status {response_status} from: {url}"

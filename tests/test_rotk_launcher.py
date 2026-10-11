@@ -4,7 +4,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from steam_utility_launcher import hwid_access, powershell_log, vc_runtime
+from steam_utility_launcher import (
+    hwid_access,
+    powershell_log,
+    svt_proton,
+    vc_runtime,
+)
 from steam_utility_launcher.utilities import rotk_launcher
 
 if TYPE_CHECKING:
@@ -46,9 +51,19 @@ def _wire(
     monkeypatch.setattr(hwid_access, "access_problem", lambda: None)
     monkeypatch.setattr(hwid_access, "tpm_problem", lambda: None)
 
+    proton_checks: list[dict[str, object]] = []
+    seen["proton_checks"] = proton_checks
+
+    def fake_ensure_game_uses(
+        _steam: object, game_id: str, **kwargs: object
+    ) -> bool:
+        proton_checks.append({"game_id": game_id, **kwargs})
+        return bool(seen.get("proton_ok", True))
+
+    monkeypatch.setattr(svt_proton, "ensure_game_uses", fake_ensure_game_uses)
+
     monkeypatch.setattr(rotk_launcher, "ensure_wine_patches", lambda _p: None)
     monkeypatch.setattr(rotk_launcher, "_prepare_tpm", lambda **_: True)
-    monkeypatch.setattr(rotk_launcher, "_ensure_fps_counter", lambda _p: None)
 
     def fake_run(
         _steam: object, _prefix: object, _command: list[str], **kwargs: object
@@ -197,24 +212,6 @@ def test_steam_overlay_layer_is_off_for_the_app(
     assert extra["DISABLE_VK_LAYER_VALVE_steam_overlay_1"] == "1"
 
 
-def test_the_fps_counter_goes_in_the_game_folder_only(tmp_path: Path) -> None:
-    game = tmp_path / "drive_c" / "Games" / "ROTK"
-    rotk_launcher._ensure_fps_counter(tmp_path)  # no game yet: nothing
-    assert not game.exists()
-    game.mkdir(parents=True)
-    rotk_launcher._ensure_fps_counter(tmp_path)
-    assert (game / "dxvk.conf").read_text() == "dxvk.hud = fps\n"
-    assert not (tmp_path / "dxvk.conf").exists()
-
-
-def test_an_edited_fps_config_is_left_alone(tmp_path: Path) -> None:
-    game = tmp_path / "drive_c" / "Games" / "ROTK"
-    game.mkdir(parents=True)
-    (game / "dxvk.conf").write_text("dxvk.hud =\n")
-    rotk_launcher._ensure_fps_counter(tmp_path)
-    assert (game / "dxvk.conf").read_text() == "dxvk.hud =\n"
-
-
 def test_only_the_steam_overlay_is_removed_from_ld_preload() -> None:
     env = {
         "LD_PRELOAD": ":/steam/ubuntu12_32/gameoverlayrenderer.so:/x/other.so"
@@ -230,14 +227,118 @@ def test_only_the_steam_overlay_is_removed_from_ld_preload() -> None:
     assert unset == {}
 
 
-def test_the_app_asks_proton_rotk_for_the_early_window_setup(
+def test_the_app_asks_svt_proton_for_the_early_window_setup(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     seen = _wire(monkeypatch, tmp_path, "")
     rotk_launcher.launch(steam=object())  # type: ignore[arg-type]
     extra = seen["extra_env"]
     assert isinstance(extra, dict)
-    assert extra["PROTON_ROTK_EAGER_DESKTOP"] == "H1Z1.exe"
+    assert extra["PROTON_SVT_EAGER_DESKTOP"] == "H1Z1.exe"
+    assert "PROTON_ROTK_EAGER_DESKTOP" not in extra
+
+
+def test_no_overlay_is_asked_for_unless_requested(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _wire(monkeypatch, tmp_path, "")
+    monkeypatch.delenv("DXVK_CONFIG", raising=False)
+    rotk_launcher.launch(steam=object())  # type: ignore[arg-type]
+    extra = seen["extra_env"]
+    assert isinstance(extra, dict)
+    assert "DXVK_CONFIG" not in extra
+    assert "DXVK_HUD" not in extra
+
+
+def test_the_overlay_is_turned_on_for_the_game_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _wire(monkeypatch, tmp_path, "")
+    monkeypatch.delenv("DXVK_CONFIG", raising=False)
+    value = "fps,gpuload,scale=1.5,opacity=0.8"
+    rotk_launcher.launch(steam=object(), hud=value)  # type: ignore[arg-type]
+    extra = seen["extra_env"]
+    assert isinstance(extra, dict)
+    # A section for the game's executable, so DXVK applies the setting to
+    # that program and not to the launcher's window.
+    assert extra["DXVK_CONFIG"] == f"[H1Z1.exe];dxvk.hud={value}"
+    assert "DXVK_HUD" not in extra  # which would show it everywhere
+
+
+def test_an_existing_dxvk_config_is_kept_ahead_of_the_overlay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _wire(monkeypatch, tmp_path, "")
+    monkeypatch.setenv("DXVK_CONFIG", "dxvk.maxFrameLatency=1")
+    rotk_launcher.launch(steam=object(), hud="fps")  # type: ignore[arg-type]
+    extra = seen["extra_env"]
+    assert isinstance(extra, dict)
+    assert extra["DXVK_CONFIG"] == (
+        "dxvk.maxFrameLatency=1;[H1Z1.exe];dxvk.hud=fps"
+    )
+
+
+@pytest.mark.parametrize(
+    "value", ["fps,gpuload", "scale=1.5", "fps,gpuload,scale=1.5,opacity=0.8"]
+)
+def test_overlay_settings_dxvk_can_read_are_accepted(value: str) -> None:
+    assert rotk_launcher.hud_value(value) == value
+
+
+@pytest.mark.parametrize(
+    "value", ["", "fps, gpuload", "fps;gpuload", 'fps"', "[fps]", "fps\t"]
+)
+def test_overlay_settings_dxvk_could_not_read_are_refused(value: str) -> None:
+    with pytest.raises(ValueError, match="without spaces"):
+        rotk_launcher.hud_value(value)
+
+
+def test_the_preferred_overlay() -> None:
+    assert rotk_launcher.DEFAULT_HUD == "fps,gpuload,scale=0.75,opacity=0.7"
+    # ... and it is something the option accepts.
+    assert rotk_launcher.hud_value(rotk_launcher.DEFAULT_HUD)
+
+
+def test_the_games_proton_is_checked_before_anything_else(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _wire(monkeypatch, tmp_path, "")
+    rotk_launcher.launch(steam=object())  # type: ignore[arg-type]
+    assert seen["proton_checks"] == [
+        {
+            "game_id": rotk_launcher.GAME_ID,
+            "game_name": "Z1 Battle Royale",
+            "override_flag": "--allow-any-proton",
+            "allow_any": False,
+        }
+    ]
+
+
+def test_nothing_is_started_when_the_game_does_not_use_svt_proton(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _wire(monkeypatch, tmp_path, "")
+    seen["proton_ok"] = False
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("went on after the Proton check refused")
+
+    monkeypatch.setattr(rotk_launcher, "_install_if_needed", fail)
+    monkeypatch.setattr(rotk_launcher, "_run_in_context", fail)
+    monkeypatch.setattr(hwid_access, "access_problem", fail)
+    assert rotk_launcher.launch(steam=object()) == 1  # type: ignore[arg-type]
+
+
+def test_allowing_any_proton_is_passed_to_the_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _wire(monkeypatch, tmp_path, "")
+    rotk_launcher.launch(
+        steam=object(), allow_any_proton=True  # type: ignore[arg-type]
+    )
+    checks = seen["proton_checks"]
+    assert isinstance(checks, list)
+    assert checks[0]["allow_any"] is True
 
 
 def test_tpm_that_cannot_be_used_stops_the_launch_before_anything_else(
