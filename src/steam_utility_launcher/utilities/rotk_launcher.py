@@ -63,20 +63,21 @@ _OVERLAY_LIBRARY = "gameoverlayrenderer"
 _GAME_EXECUTABLE = "H1Z1.exe"
 _EAGER_DESKTOP = {"PROTON_SVT_EAGER_DESKTOP": _GAME_EXECUTABLE}
 
+# Settings for DXVK in the game are passed in DXVK_CONFIG, in a section for the
+# game's executable: every DXVK process gets the variable (the game inherits
+# the launcher's environment), but DXVK only applies a section to the program
+# it names, so the launcher's own window is left alone.
+_DXVK_CONFIG_ENV_VAR = "DXVK_CONFIG"
+
 # DXVK's own overlay stands in for Steam's (see above); it is only shown when
 # asked for with --hud or --default-hud. The value is what DXVK_HUD takes: a
 # comma-separated list of items (fps, gpuload, frametimes, memory, ...) and of
-# options written name=value (scale=1.5, opacity=0.8). It is passed in
-# DXVK_CONFIG, in a section for the game's executable: every DXVK process
-# gets the variable (the game inherits the launcher's environment), but DXVK
-# only applies a section to the program it names, so the launcher's own window
-# doesn't show the overlay. (A DXVK_HUD in the environment would show it
-# everywhere, and takes precedence over this.)
-_DXVK_CONFIG_ENV_VAR = "DXVK_CONFIG"
-# DXVK splits that variable at ';', and ends a value at whitespace or a quote.
+# options written name=value (scale=1.5, opacity=0.8). (A DXVK_HUD in the
+# environment would show it in every window, and takes precedence over this.)
+# DXVK splits DXVK_CONFIG at ';', and ends a value at whitespace or a quote.
 _HUD_FORBIDDEN = re.compile(r'[\s;"\[\]]')
 # The overlay this tool's author prefers, for --default-hud.
-DEFAULT_HUD = "fps,gpuload,scale=0.75,opacity=0.7"
+DEFAULT_HUD = "fps,gpuload,scale=0.8,opacity=1.0"
 
 
 def hud_value(text: str) -> str:
@@ -91,10 +92,55 @@ def hud_value(text: str) -> str:
     return text
 
 
-def _hud_config(hud: str, existing: str) -> str:
-    """The DXVK_CONFIG value that turns the overlay on in the game only,
+def max_fps_value(text: str) -> int:
+    """Checks a frame rate limit for --max-fps: DXVK's dxgi.maxFrameRate also
+    takes 0 (no limit) and negative numbers (special modes for its own game
+    profiles), which have no use here."""
+    try:
+        frames_per_second = int(text)
+    except ValueError:
+        frames_per_second = 0
+    if frames_per_second < 1:
+        msg = "expected a whole number of frames per second, such as 144"
+        raise ValueError(msg)
+    return frames_per_second
+
+
+# DXGI refuses a sync interval above 4, so DXVK does too.
+_VSYNC_MAXIMUM = 4
+
+
+def vsync_value(text: str) -> int:
+    """Checks a sync interval for --vsync: the number of monitor refreshes
+    between frames, 0 being no vsync at all."""
+    try:
+        interval = int(text)
+    except ValueError:
+        interval = -1
+    if not 0 <= interval <= _VSYNC_MAXIMUM:
+        msg = (
+            f"expected 0 (vsync off) to {_VSYNC_MAXIMUM}: the number of"
+            " monitor refreshes between frames, 1 being every refresh"
+        )
+        raise ValueError(msg)
+    return interval
+
+
+def _game_config(
+    *, hud: str | None, max_fps: int | None, vsync: int | None, existing: str
+) -> str:
+    """The DXVK_CONFIG value that applies these settings in the game only,
     after whatever DXVK_CONFIG the environment already had."""
-    section = f"[{_GAME_EXECUTABLE}];dxvk.hud={hud}"
+    options = []
+    if hud:
+        options.append(f"dxvk.hud={hud}")
+    if max_fps is not None:
+        options.append(f"dxgi.maxFrameRate={max_fps}")
+    if vsync is not None:
+        options.append(f"dxgi.syncInterval={vsync}")
+    if not options:
+        return existing
+    section = ";".join([f"[{_GAME_EXECUTABLE}]", *options])
     return f"{existing};{section}" if existing else section
 
 
@@ -350,6 +396,8 @@ def launch(  # noqa: PLR0913
     tpm_endorsement: bool = False,
     allow_any_proton: bool = False,
     hud: str | None = None,
+    max_fps: int | None = None,
+    vsync: int | None = None,
 ) -> int:
     tpm = tpm or tpm_endorsement
     prefix, app_path = _resolve_app_path(steam)
@@ -418,11 +466,14 @@ def launch(  # noqa: PLR0913
             **_EAGER_DESKTOP,
             **(
                 {
-                    _DXVK_CONFIG_ENV_VAR: _hud_config(
-                        hud, os.environ.get(_DXVK_CONFIG_ENV_VAR, "")
+                    _DXVK_CONFIG_ENV_VAR: _game_config(
+                        hud=hud,
+                        max_fps=max_fps,
+                        vsync=vsync,
+                        existing=os.environ.get(_DXVK_CONFIG_ENV_VAR, ""),
                     )
                 }
-                if hud
+                if hud or max_fps is not None or vsync is not None
                 else {}
             ),
             **_tpm_environment(tpm=tpm, endorsement=tpm_endorsement),

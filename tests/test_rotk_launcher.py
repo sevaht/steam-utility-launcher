@@ -278,6 +278,100 @@ def test_an_existing_dxvk_config_is_kept_ahead_of_the_overlay(
     )
 
 
+def test_a_frame_rate_limit_is_set_for_the_game_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _wire(monkeypatch, tmp_path, "")
+    monkeypatch.delenv("DXVK_CONFIG", raising=False)
+    rotk_launcher.launch(steam=object(), max_fps=144)  # type: ignore[arg-type]
+    extra = seen["extra_env"]
+    assert isinstance(extra, dict)
+    assert extra["DXVK_CONFIG"] == "[H1Z1.exe];dxgi.maxFrameRate=144"
+
+
+def test_the_overlay_and_a_frame_rate_limit_share_the_games_section(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _wire(monkeypatch, tmp_path, "")
+    monkeypatch.setenv("DXVK_CONFIG", "dxvk.maxFrameLatency=1")
+    rotk_launcher.launch(
+        steam=object(), hud="fps", max_fps=60  # type: ignore[arg-type]
+    )
+    extra = seen["extra_env"]
+    assert isinstance(extra, dict)
+    assert extra["DXVK_CONFIG"] == (
+        "dxvk.maxFrameLatency=1;[H1Z1.exe];dxvk.hud=fps;dxgi.maxFrameRate=60"
+    )
+
+
+@pytest.mark.parametrize("interval", [0, 1, 2, 4])
+def test_vsync_is_overridden_for_the_game_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, interval: int
+) -> None:
+    seen = _wire(monkeypatch, tmp_path, "")
+    monkeypatch.delenv("DXVK_CONFIG", raising=False)
+    rotk_launcher.launch(
+        steam=object(), vsync=interval  # type: ignore[arg-type]
+    )
+    extra = seen["extra_env"]
+    assert isinstance(extra, dict)
+    # Including 0, which turns vsync off: it must not be mistaken for unset.
+    assert extra["DXVK_CONFIG"] == f"[H1Z1.exe];dxgi.syncInterval={interval}"
+
+
+def test_vsync_is_left_to_the_game_unless_asked_for(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _wire(monkeypatch, tmp_path, "")
+    monkeypatch.delenv("DXVK_CONFIG", raising=False)
+    rotk_launcher.launch(steam=object())  # type: ignore[arg-type]
+    extra = seen["extra_env"]
+    assert isinstance(extra, dict)
+    assert "DXVK_CONFIG" not in extra
+
+
+def test_everything_asked_for_shares_the_games_section(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _wire(monkeypatch, tmp_path, "")
+    monkeypatch.delenv("DXVK_CONFIG", raising=False)
+    rotk_launcher.launch(
+        steam=object(),  # type: ignore[arg-type]
+        hud="fps",
+        max_fps=144,
+        vsync=0,
+    )
+    extra = seen["extra_env"]
+    assert isinstance(extra, dict)
+    assert extra["DXVK_CONFIG"] == (
+        "[H1Z1.exe];dxvk.hud=fps;dxgi.maxFrameRate=144;dxgi.syncInterval=0"
+    )
+
+
+@pytest.mark.parametrize("value", ["0", "1", "2", "3", "4"])
+def test_sync_intervals_dxgi_allows_are_accepted(value: str) -> None:
+    assert rotk_launcher.vsync_value(value) == int(value)
+
+
+@pytest.mark.parametrize("value", ["5", "-1", "", "on", "1.5", "99"])
+def test_sync_intervals_dxgi_would_refuse_are_refused(value: str) -> None:
+    with pytest.raises(ValueError, match=r"0 \(vsync off\) to 4"):
+        rotk_launcher.vsync_value(value)
+
+
+@pytest.mark.parametrize("value", ["1", "60", "144", "240"])
+def test_frame_rate_limits_dxvk_can_use_are_accepted(value: str) -> None:
+    assert rotk_launcher.max_fps_value(value) == int(value)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "-60", "", "abc", "60.5", "1e3"])
+def test_frame_rate_limits_that_mean_something_else_are_refused(
+    value: str,
+) -> None:
+    with pytest.raises(ValueError, match="whole number"):
+        rotk_launcher.max_fps_value(value)
+
+
 @pytest.mark.parametrize(
     "value", ["fps,gpuload", "scale=1.5", "fps,gpuload,scale=1.5,opacity=0.8"]
 )
@@ -294,7 +388,7 @@ def test_overlay_settings_dxvk_could_not_read_are_refused(value: str) -> None:
 
 
 def test_the_preferred_overlay() -> None:
-    assert rotk_launcher.DEFAULT_HUD == "fps,gpuload,scale=0.75,opacity=0.7"
+    assert rotk_launcher.DEFAULT_HUD == "fps,gpuload,scale=0.8,opacity=1.0"
     # ... and it is something the option accepts.
     assert rotk_launcher.hud_value(rotk_launcher.DEFAULT_HUD)
 

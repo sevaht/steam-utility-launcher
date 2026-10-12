@@ -77,7 +77,7 @@ is: a comma-separated list of items (`fps`, `gpuload`, `frametimes`, `memory`,
 `devinfo`, `pipelines`, ...) and of `name=value` options, which is how scale
 (0.25 to 4) and opacity (0.1 to 1) are set. It can't contain spaces, quotes,
 brackets or `;`. `--default-hud` is the same with the author's preferred settings
-(`fps,gpuload,scale=0.75,opacity=0.7`). The two can't be combined.
+(`fps,gpuload,scale=0.8,opacity=1.0`). The two can't be combined.
 
 The overlay is shown in the game only, not over the launcher's own window. It
 is passed as `DXVK_CONFIG="[H1Z1.exe];dxvk.hud=<items>"`: every DXVK process
@@ -85,6 +85,37 @@ gets the variable, but DXVK applies a section only to the program it names. No
 file is written. A `DXVK_CONFIG` already in your environment is kept (the
 overlay is added after it). A `DXVK_HUD` in your environment takes precedence
 over all of this and shows the overlay in every window; avoid setting it.
+
+**Frame rate limit.** `--max-fps FPS` caps the game's frame rate with DXVK's
+`dxgi.maxFrameRate`, for example to match your monitor's refresh rate instead
+of using vsync (a menu that isn't limited renders as fast as the GPU allows,
+which means full load and heat for nothing):
+
+```bash
+steam-utility-launcher rotk-launcher --default-hud --max-fps 144
+```
+
+It takes a whole number of at least 1 (DXVK's own 0 and negative values are
+special modes that don't belong here), and is passed in the same
+`DXVK_CONFIG` section as the overlay, so it too applies to the game only. No
+limit is set unless you ask for one.
+
+**Vsync.** `--vsync N` overrides the game's vsync with DXVK's
+`dxgi.syncInterval`, the number of monitor refreshes between frames: `0` turns
+vsync off (frames are presented at once), `1` shows a frame every refresh
+(60 fps on a 60 Hz monitor), `2` every second refresh (half the refresh rate),
+up to `4`, which is as far as DXGI allows. Nothing is overridden unless you
+pass it, which leaves the choice to the game's own setting.
+
+```bash
+steam-utility-launcher rotk-launcher --vsync 0 --max-fps 60
+```
+
+Whether turning vsync off tears depends on your display setup: an X server
+that composes every frame in sync with the display (the NVIDIA driver's
+`ForceFullCompositionPipeline`, or a compositor with vsync) shows no tearing
+whatever the game does. Frames the game renders beyond the refresh rate are
+then wasted, which is what `--max-fps` is for.
 
 If ROTK Launcher isn't installed yet, this downloads the latest release,
 verifies its checksum against the release's `SHA256SUMS.txt`, and runs the

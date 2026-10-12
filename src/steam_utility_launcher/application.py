@@ -122,6 +122,20 @@ def _hud_argument(text: str) -> str:
         raise argparse.ArgumentTypeError(str(error)) from None
 
 
+def _max_fps_argument(text: str) -> int:
+    try:
+        return rotk_launcher.max_fps_value(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+
+
+def _vsync_argument(text: str) -> int:
+    try:
+        return rotk_launcher.vsync_value(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -240,6 +254,27 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rotk_launcher_parser.add_argument(
+        "--max-fps",
+        metavar="FPS",
+        type=_max_fps_argument,
+        help=(
+            "Limit the game to this many frames per second (DXVK's"
+            " dxgi.maxFrameRate), for example to match your monitor's"
+            " refresh rate instead of using vsync. No limit by default."
+        ),
+    )
+    rotk_launcher_parser.add_argument(
+        "--vsync",
+        metavar="N",
+        type=_vsync_argument,
+        help=(
+            "Override the game's vsync (DXVK's dxgi.syncInterval): 0 turns it"
+            " off, 1 shows a frame every monitor refresh, 2 every second"
+            " refresh (half the refresh rate), up to 4. Not set by default,"
+            " which leaves it to the game's own setting."
+        ),
+    )
+    rotk_launcher_parser.add_argument(
         "--tpm",
         action="store_true",
         help=(
@@ -340,6 +375,8 @@ def _launch_preset(  # noqa: PLR0913
     tpm_endorsement: bool = False,
     allow_any_proton: bool = False,
     hud: str | None = None,
+    max_fps: int | None = None,
+    vsync: int | None = None,
 ) -> int:
     if mode == "hitman-peacock":
         return hitman_peacock.launch(steam=steam)
@@ -355,6 +392,8 @@ def _launch_preset(  # noqa: PLR0913
             tpm_endorsement=tpm_endorsement,
             allow_any_proton=allow_any_proton,
             hud=hud,
+            max_fps=max_fps,
+            vsync=vsync,
         )
     if mode == "zemu":
         return zemu.launch(
@@ -438,5 +477,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if getattr(args, "default_hud", False)
                 else getattr(args, "hud", None)
             ),
+            max_fps=getattr(args, "max_fps", None),
+            vsync=getattr(args, "vsync", None),
         )
     return 0
