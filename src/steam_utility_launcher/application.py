@@ -10,7 +10,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import hwid_access, svt_proton
+from . import __version__, hwid_access, svt_proton
 from .steam import Steam
 from .utilities import (
     dsr_gadget,
@@ -141,6 +141,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Starts applications inside the Proton prefix of a Steam game."
         )
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
     log_group = parser.add_argument_group("logging")
     log_group.add_argument(
