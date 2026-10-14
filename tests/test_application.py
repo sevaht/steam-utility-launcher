@@ -130,3 +130,19 @@ def test_a_vsync_interval_dxgi_would_refuse_is_a_usage_error(
         application.main(["rotk-launcher", f"--vsync={value}"])
     assert calls == []
     assert "monitor refreshes between frames" in capsys.readouterr().err
+
+
+def test_the_steam_overlay_is_not_taken_away_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _launches(monkeypatch)
+    application.main(["rotk-launcher"])
+    assert calls[0]["no_steam_overlay"] is False
+
+
+def test_taking_the_steam_overlay_away_is_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _launches(monkeypatch)
+    application.main(["rotk-launcher", "--no-steam-overlay"])
+    assert calls[0]["no_steam_overlay"] is True

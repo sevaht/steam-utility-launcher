@@ -278,6 +278,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rotk_launcher_parser.add_argument(
+        "--no-steam-overlay",
+        action="store_true",
+        help=(
+            "Take Steam's overlay away from the launcher and the game, even"
+            " if it is enabled for the shortcut in Steam. Without this it is"
+            " left as Steam set it up. Only useful if the game stalls"
+            " while starting with the overlay."
+        ),
+    )
+    rotk_launcher_parser.add_argument(
         "--tpm",
         action="store_true",
         help=(
@@ -380,6 +390,7 @@ def _launch_preset(  # noqa: PLR0913
     hud: str | None = None,
     max_fps: int | None = None,
     vsync: int | None = None,
+    no_steam_overlay: bool = False,
 ) -> int:
     if mode == "hitman-peacock":
         return hitman_peacock.launch(steam=steam)
@@ -397,6 +408,7 @@ def _launch_preset(  # noqa: PLR0913
             hud=hud,
             max_fps=max_fps,
             vsync=vsync,
+            no_steam_overlay=no_steam_overlay,
         )
     if mode == "zemu":
         return zemu.launch(
@@ -482,5 +494,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             max_fps=getattr(args, "max_fps", None),
             vsync=getattr(args, "vsync", None),
+            no_steam_overlay=getattr(args, "no_steam_overlay", False),
         )
     return 0

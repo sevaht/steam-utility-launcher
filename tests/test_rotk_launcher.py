@@ -69,7 +69,12 @@ def _wire(
         _steam: object, _prefix: object, _command: list[str], **kwargs: object
     ) -> _FakeProcess:
         seen.update(kwargs)
-        return _FakeProcess(log_record)
+        process = _FakeProcess(log_record)
+        initial_env = seen.get("process_env")
+        if isinstance(initial_env, dict):
+            process.env = initial_env  # what Steam handed the tool
+        seen["process"] = process
+        return process
 
     monkeypatch.setattr(rotk_launcher, "_run_in_context", fake_run)
     return seen
@@ -202,14 +207,37 @@ def test_endorsement_extras_are_off_unless_asked_for(
     assert extra["SUL_TPM"] == "1"  # the extras imply the TPM itself
 
 
-def test_steam_overlay_layer_is_off_for_the_app(
+def test_steams_overlay_is_left_as_steam_set_it_up(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     seen = _wire(monkeypatch, tmp_path, "")
+    preload = "/lib/gameoverlayrenderer.so:/lib/other.so"
+    seen["process_env"] = {"LD_PRELOAD": preload}
     rotk_launcher.launch(steam=object())  # type: ignore[arg-type]
     extra = seen["extra_env"]
     assert isinstance(extra, dict)
+    assert "DISABLE_VK_LAYER_VALVE_steam_overlay_1" not in extra
+    process = seen["process"]
+    assert isinstance(process, _FakeProcess)
+    assert process.env == {"LD_PRELOAD": preload}  # untouched
+
+
+def test_the_steam_overlay_can_be_taken_away(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _wire(monkeypatch, tmp_path, "")
+    seen["process_env"] = {
+        "LD_PRELOAD": "/lib/gameoverlayrenderer.so:/lib/other.so"
+    }
+    rotk_launcher.launch(
+        steam=object(), no_steam_overlay=True  # type: ignore[arg-type]
+    )
+    extra = seen["extra_env"]
+    assert isinstance(extra, dict)
     assert extra["DISABLE_VK_LAYER_VALVE_steam_overlay_1"] == "1"
+    process = seen["process"]
+    assert isinstance(process, _FakeProcess)
+    assert process.env == {"LD_PRELOAD": "/lib/other.so"}  # only it removed
 
 
 def test_only_the_steam_overlay_is_removed_from_ld_preload() -> None:

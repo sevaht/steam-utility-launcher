@@ -63,9 +63,13 @@ steam-utility-launcher rotk-launcher
 > `steam-utility-launcher svt-proton`. To run with whatever Proton Steam uses
 > for the game anyway, add `--allow-any-proton`.
 
-**Overlay.** Steam's overlay is turned off for the game (it doesn't work with
-DXVK, which the game runs on), so there's no frame counter unless you ask for
-DXVK's own overlay:
+**Overlay.** Steam's overlay is left as Steam sets it up for the shortcut: turn
+it on in the shortcut's Properties and it works in the launcher and the game,
+turn it off and it isn't there. It is drawn over every window of the process,
+so it also appears over the launcher. If the game ever stalls while starting
+with it, `--no-steam-overlay` takes it away from the launcher and the game
+whatever Steam says. DXVK's own overlay is separate, and can be shown alongside
+it or instead of it:
 
 ```bash
 steam-utility-launcher rotk-launcher --default-hud

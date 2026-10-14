@@ -47,10 +47,11 @@ _TPM_ENV_VAR = "SUL_TPM"
 _TPM_ENDORSEMENT_ENV_VAR = "SUL_TPM_ENDORSEMENT"
 
 
-# Steam's overlay doesn't work with DXVK (which is what makes the game run
-# well): its preloaded library stalls the game's start-up, and its Vulkan
-# layer draws an FPS counter over the launcher's own window. So neither is
-# passed on: the layer is switched off and the library is dropped from
+# Steam's overlay is left as Steam set it up for the shortcut: enable it
+# there (Properties > Overlay) and it works in the launcher and the game;
+# disable it and nothing is passed on. --no-steam-overlay takes it away
+# regardless, for a start-up stall that has been blamed on its preloaded
+# library: the layer is switched off and the library is dropped from
 # LD_PRELOAD (see _without_steam_overlay).
 _STEAM_OVERLAY_OFF = {"DISABLE_VK_LAYER_VALVE_steam_overlay_1": "1"}
 _OVERLAY_LIBRARY = "gameoverlayrenderer"
@@ -398,6 +399,7 @@ def launch(  # noqa: PLR0913
     hud: str | None = None,
     max_fps: int | None = None,
     vsync: int | None = None,
+    no_steam_overlay: bool = False,
 ) -> int:
     tpm = tpm or tpm_endorsement
     prefix, app_path = _resolve_app_path(steam)
@@ -462,7 +464,7 @@ def launch(  # noqa: PLR0913
         as_game=True,
         extra_env={
             powershell_log.ENV_VAR: powershell_log.wine_path(ps_log),
-            **_STEAM_OVERLAY_OFF,
+            **(_STEAM_OVERLAY_OFF if no_steam_overlay else {}),
             **_EAGER_DESKTOP,
             **(
                 {
@@ -479,7 +481,7 @@ def launch(  # noqa: PLR0913
             **_tpm_environment(tpm=tpm, endorsement=tpm_endorsement),
         },
     )
-    if process.env is not None:
+    if no_steam_overlay and process.env is not None:
         _without_steam_overlay(process.env)
     return_code = process.start().wait()
     # The stand-in refuses (and logs) any hardware-ID command it doesn't
