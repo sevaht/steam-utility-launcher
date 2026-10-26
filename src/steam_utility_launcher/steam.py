@@ -522,7 +522,7 @@ class Steam:
         dosdevices = self.game_wine_prefix(game_id=game_id) / "dosdevices"
         dosdevices.mkdir(parents=True, exist_ok=True)
         drive_s = dosdevices / "s:"
-        target = self.location.steamapps
+        target = self.game_library_path(game_id=game_id)
         if drive_s.exists() or drive_s.is_symlink():
             try:
                 if drive_s.resolve() == target.resolve():
