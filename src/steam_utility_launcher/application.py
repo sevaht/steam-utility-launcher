@@ -216,7 +216,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Install and run ROTK Launcher for Z1 Battle Royale. On Linux this"
             " wraps a Steam shortcut's launch: set the shortcut's launch"
-            " options to `steam-utility-launcher rotk-launcher -- %%command%%`."
+            " options to `steam-utility-launcher rotk-launcher -- %%command%%`;"
+            " run on its own, it adds that shortcut to Steam."
+        ),
+    )
+    rotk_launcher_parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help=(
+            "When adding the shortcut to Steam, close Steam without asking"
+            " (it has to be closed for the change to be saved)."
+        ),
+    )
+    rotk_launcher_parser.add_argument(
+        "--no-launch",
+        action="store_true",
+        help=(
+            "When adding or updating the shortcut in Steam, don't also have"
+            " Steam start it."
         ),
     )
     rotk_launcher_parser.add_argument(
@@ -391,6 +409,22 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _shortcut_options(argv: Sequence[str], mode: str) -> list[str]:
+    """The options of `mode` as given, for the launch options of the Steam
+    shortcut it adds (what only matters to adding it is left out)."""
+    given = list(argv)
+    if mode not in given:
+        return []
+    options = given[given.index(mode) + 1 :]
+    if "--" in options:
+        options = options[: options.index("--")]
+    return [
+        option
+        for option in options
+        if option not in {"-y", "--yes", "--no-launch"}
+    ]
+
+
 def _launch_preset(  # noqa: PLR0913
     mode: str,
     steam: Steam | None,
@@ -407,6 +441,9 @@ def _launch_preset(  # noqa: PLR0913
     no_steam_overlay: bool = False,
     steam_command: list[str] | None = None,
     session: CompatSession | None = None,
+    shortcut_options: list[str] | None = None,
+    assume_yes: bool = False,
+    start_shortcut: bool = True,
 ) -> int:
     if mode == "hitman-peacock":
         return hitman_peacock.launch(steam=steam)
@@ -427,6 +464,9 @@ def _launch_preset(  # noqa: PLR0913
             no_steam_overlay=no_steam_overlay,
             steam_command=steam_command,
             session=session,
+            shortcut_options=shortcut_options,
+            assume_yes=assume_yes,
+            start_shortcut=start_shortcut,
         )
     if mode == "zemu":
         return zemu.launch(
@@ -515,5 +555,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             no_steam_overlay=getattr(args, "no_steam_overlay", False),
             steam_command=getattr(args, "steam_command", None),
             session=CompatSession.from_environment(os.environ),
+            shortcut_options=_shortcut_options(
+                sys.argv[1:] if argv is None else argv, args.mode
+            ),
+            assume_yes=getattr(args, "yes", False),
+            start_shortcut=not getattr(args, "no_launch", False),
         )
     return 0

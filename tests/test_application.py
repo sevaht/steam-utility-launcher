@@ -146,3 +146,23 @@ def test_taking_the_steam_overlay_away_is_forwarded(
     calls = _launches(monkeypatch)
     application.main(["rotk-launcher", "--no-steam-overlay"])
     assert calls[0]["no_steam_overlay"] is True
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["rotk-launcher"], []),
+        (["rotk-launcher", "--max-fps", "150"], ["--max-fps", "150"]),
+        (["--log-file", "x", "rotk-launcher", "--tpm"], ["--tpm"]),
+        (["rotk-launcher", "-y", "--default-hud"], ["--default-hud"]),
+        (["rotk-launcher", "--yes", "--vsync", "0"], ["--vsync", "0"]),
+        (["rotk-launcher", "--no-launch", "--tpm"], ["--tpm"]),
+        (["rotk-launcher", "--tpm", "--", "steam", "cmd"], ["--tpm"]),
+    ],
+)
+def test_only_the_launch_options_go_into_the_shortcut(
+    argv: list[str], expected: list[str]
+) -> None:
+    from steam_utility_launcher.application import _shortcut_options
+
+    assert _shortcut_options(argv, "rotk-launcher") == expected

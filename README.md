@@ -47,25 +47,38 @@ After launching Dark Souls: Remastered, run SilkySouls:
 steam-utility-launcher silky-souls
 ```
 
-Install and run ROTK Launcher for Z1 Battle Royale. On Linux this is a
-wrapper in the launch options of a Steam shortcut, so Steam runs Proton (in its
-runtime container) as it does for any game:
+Install and run ROTK Launcher for Z1 Battle Royale. On Linux this runs as a
+Steam shortcut, so Steam runs Proton (in its runtime container) as it does for
+any game. Run the command on its own and it sets the shortcut up and starts it:
+```bash
+steam-utility-launcher rotk-launcher --max-fps 150
+```
+This adds a non-Steam game, "ROTK Launcher", to your Steam library, with
+SVT-Proton ([see below](#svt-proton)) as its compatibility tool, ROTK
+Launcher's own icon (copied out of the installed launcher once it's there),
+and the options you gave baked into its launch options
+(`... rotk-launcher --max-fps 150 -- %command%`). Then it has Steam start it
+(`--no-launch` leaves that to you), so the first run is also the first launch:
+it makes the shortcut's own prefix, installs ROTK Launcher in it and sets it
+up, which takes a while. The game's files are copied by ROTK Launcher from the
+Steam library Z1 Battle Royale is installed in, so that must be installed.
 
-1. In Steam, add a non-Steam game and name it, say, "ROTK Launcher". Its
-   target is never run, so any file will do, such as `/usr/bin/true`.
-2. Under its Properties > Compatibility, force **SVT-Proton-GE11** (see
-   [SVT-Proton](#svt-proton)).
-3. Set its launch options to:
-   ```
-   steam-utility-launcher rotk-launcher -- %command%
-   ```
-   Options of this program go before the `--`, for example
-   `steam-utility-launcher rotk-launcher --default-hud -- %command%`.
+Steam keeps its library in memory and ignores changes made to its files while
+it runs, so when the shortcut has to be added or changed, Steam is closed first
+(you're asked; `-y` skips the question) and started again by the launch. Run
+it again with different options and it updates the shortcut's launch options
+to match and tells you what it changed. Run it again with the same options, or
+with none, and nothing is touched or closed: it just starts the shortcut. The
+options can also be edited in the shortcut's Properties in Steam, and work the
+same: they go between `rotk-launcher` and the `--`.
 
-The first launch makes the shortcut's own prefix, installs ROTK Launcher in it
-and sets it up; it takes a while. The game's files are copied by ROTK Launcher
-from the Steam library Z1 Battle Royale is installed in, so that must be
-installed. On Windows, run `steam-utility-launcher rotk-launcher` directly.
+On Windows, run `steam-utility-launcher rotk-launcher` directly.
+
+To set the shortcut up by hand instead: add a non-Steam game (its target is
+never run, but it can't be empty or Steam shows no icon: use `/usr/bin/true`),
+force **SVT-Proton-GE11** under Properties > Compatibility, and set its launch
+options to `steam-utility-launcher rotk-launcher -- %command%` (options of this
+program go before the `--`).
 
 > **Linux note:** the shortcut has to use [SVT-Proton](#svt-proton).
 > `rotk-launcher` refuses to start otherwise, because on other Protons the

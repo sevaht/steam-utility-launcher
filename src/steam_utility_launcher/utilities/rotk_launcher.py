@@ -9,8 +9,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from steam_utility_launcher import (
+    asar,
     hwid_access,
     powershell_log,
+    steam_shortcuts,
     svt_proton,
     tpm_setup,
     update_check,
@@ -34,6 +36,12 @@ logger = logging.getLogger(__name__)
 # running under. ROTK Launcher itself has a prefix of its own: the one Steam
 # makes for the shortcut that runs this program (see launch()).
 GAME_ID = "433850"
+# The name of the non-Steam game this program adds to Steam's library.
+SHORTCUT_NAME = "ROTK Launcher"
+# The launcher's own mark, in its app.asar: what the Steam shortcut shows. It
+# is copied out of the installed launcher (nothing of it is shipped here) to a
+# fixed place, so the shortcut can name it before the launcher is installed.
+_ICON_IN_ASAR = "dist/branding/rotk-mark.png"
 # Waives the requirement that the Proton ROTK Launcher runs with be SVT-Proton.
 ALLOW_ANY_PROTON_FLAG = "--allow-any-proton"
 # What Steam's command for the shortcut has before the program to run
@@ -41,14 +49,6 @@ ALLOW_ANY_PROTON_FLAG = "--allow-any-proton"
 _PROTON_COMMAND_LENGTH = 2
 # The program that has Proton make the prefix and does nothing else.
 _PREFIX_MAKER = ["cmd", "/c", "exit"]
-_SETUP_HELP = (
-    "ROTK Launcher is started by Steam, with Proton: this program wraps the"
-    " launch. In Steam, open the shortcut's Properties and set Compatibility"
-    " to SVT-Proton, and the launch options to:\n"
-    "    steam-utility-launcher rotk-launcher -- %command%\n"
-    "(add any options of this program before the --). The shortcut's target"
-    " is not used: any file will do."
-)
 _ASSET_PATTERN = re.compile(r"ROTK-Launcher-[0-9]+(\.[0-9]+)*-x64\.exe")
 _CHECKSUMS_ASSET_NAME = Path("SHA256SUMS.txt")
 _CHECKSUM_LINE_PART_COUNT = 2
@@ -556,6 +556,75 @@ def _install_if_needed(
     logger.info('Installed ROTK Launcher "%s".', release.tag)
 
 
+def _launcher_command() -> list[str]:
+    """How to run this program again, as a command."""
+    script = Path(sys.argv[0])
+    if script.name == "__main__.py" or not script.is_file():
+        return [sys.executable, "-m", "steam_utility_launcher"]
+    return [str(script.absolute())]
+
+
+def icon_path() -> Path:
+    return XDG_DATA_ROOT / "ROTK-Launcher" / "icon.png"
+
+
+def _save_icon(app_path: Path) -> bool:
+    """Copies the launcher's mark out of the installed launcher to `icon_path`.
+    Best effort: whether it was saved. Never an error."""
+    archive = app_path.parent / "resources" / "app.asar"
+    try:
+        content = asar.read_file(archive, _ICON_IN_ASAR)
+        destination = icon_path()
+        if destination.exists() and destination.read_bytes() == content:
+            return True
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = destination.with_suffix(".png.part")
+        staging.write_bytes(content)
+        staging.replace(destination)
+    except (OSError, asar.AsarError):
+        logger.debug("Could not save the launcher's icon", exc_info=True)
+        return False
+    return True
+
+
+def _save_icon_from_any_prefix(steam: Steam) -> None:
+    """Saves the icon from a ROTK Launcher installed in one of Steam's
+    shortcut prefixes, if there is one (the wrapper does it itself after
+    installing)."""
+    compatdata = steam.location.steamapps / "compatdata"
+    try:
+        candidates = sorted(
+            compatdata.glob(
+                "*/pfx/drive_c/Program Files/ROTK Launcher/ROTK Launcher.exe"
+            )
+        )
+    except OSError:
+        return
+    for candidate in candidates:
+        if _save_icon(candidate):
+            return
+
+
+def _add_to_steam(
+    steam: Steam, *, options: list[str], assume_yes: bool, start: bool
+) -> int:
+    """Adds ROTK Launcher to Steam as a non-Steam game that runs this program
+    with `options` (see launch), or changes the options of the one that is
+    there, and has Steam start it."""
+    _save_icon_from_any_prefix(steam)
+    app_id = steam_shortcuts.ensure_shortcut(
+        steam,
+        name=SHORTCUT_NAME,
+        program=_launcher_command(),
+        mode="rotk-launcher",
+        options=options,
+        icon=icon_path(),
+        assume_yes=assume_yes,
+        launch=start,
+    )
+    return 0 if app_id is not None else 1
+
+
 def _checks_pass(
     steam: Steam | None,
     session: CompatSession,
@@ -597,6 +666,9 @@ def launch(  # noqa: PLR0913
     no_steam_overlay: bool = False,
     steam_command: list[str] | None = None,
     session: CompatSession | None = None,
+    shortcut_options: list[str] | None = None,
+    assume_yes: bool = False,
+    start_shortcut: bool = True,
 ) -> int:
     """Installs ROTK Launcher if needed and runs it.
 
@@ -606,11 +678,20 @@ def launch(  # noqa: PLR0913
     runs Proton in its runtime container (`steam_command`), and this prepares
     the prefix, then has Steam's command run ROTK Launcher in place of the
     shortcut's target. `session` is what Steam tells it of the launch.
+
+    Run on its own (without Steam's command) it adds that shortcut to Steam,
+    with `shortcut_options` in its launch options, or updates the options of
+    the one that is there, then has Steam start it (unless `start_shortcut`
+    is off).
     """
     tpm = tpm or tpm_endorsement
     if sys.platform.startswith("linux") and (not steam_command or not session):
-        logger.error(_SETUP_HELP)
-        return 1
+        return _add_to_steam(
+            _require_steam(steam),
+            options=shortcut_options or [],
+            assume_yes=assume_yes,
+            start=start_shortcut,
+        )
     prefix, app_path = _resolve_app_path(session)
     if prefix is not None and not _checks_pass(
         steam,
@@ -638,6 +719,8 @@ def launch(  # noqa: PLR0913
         app_path=app_path,
         force=force,
     )
+    if prefix is not None:
+        _save_icon(app_path)
     if prefix is None or ps_log is None:
         return _run_in_context(steam, prefix, [str(app_path)]).start().wait()
     # ROTK's anti-cheat needs a Visual C++ runtime newer than the 2016 one that

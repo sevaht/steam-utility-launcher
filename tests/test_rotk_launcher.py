@@ -7,11 +7,13 @@ import pytest
 from steam_utility_launcher import (
     hwid_access,
     powershell_log,
+    steam_shortcuts,
     svt_proton,
     vc_runtime,
 )
 from steam_utility_launcher.steam import CompatSession
 from steam_utility_launcher.utilities import rotk_launcher
+from tests.asar_helper import make_asar
 
 
 class _FakeProcess:
@@ -75,6 +77,9 @@ def _wire(
         svt_proton, "ensure_session_uses", fake_ensure_session_uses
     )
     monkeypatch.setattr(rotk_launcher, "_make_prefix", lambda *_: True)
+    monkeypatch.setattr(
+        rotk_launcher, "_save_icon_from_any_prefix", lambda _s: None
+    )
     monkeypatch.setattr(
         rotk_launcher, "_publish_game_library", lambda *_: None
     )
@@ -660,40 +665,92 @@ def test_the_game_runs_as_z1_with_its_library_mounted(
     assert process.command_line[-1] == str(Path("C:/ROTK Launcher.exe"))
 
 
-def test_without_steams_command_the_launch_explains_the_set_up(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
+def test_without_steams_command_the_launch_adds_the_shortcut_to_steam(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _wire(monkeypatch, tmp_path, "")
-    with caplog.at_level("ERROR"):
-        assert (
-            rotk_launcher.launch(steam=object()) == 1  # type: ignore[arg-type]
+    calls: list[dict[str, object]] = []
+
+    def fake_ensure(steam: object, **kwargs: object) -> int:
+        calls.append({"steam": steam, **kwargs})
+        return 1
+
+    monkeypatch.setattr(steam_shortcuts, "ensure_shortcut", fake_ensure)
+    monkeypatch.setattr(
+        rotk_launcher, "_launcher_command", lambda: ["/bin/sul"]
+    )
+    steam = object()
+    assert (
+        rotk_launcher.launch(
+            steam=steam,  # type: ignore[arg-type]
+            shortcut_options=["--max-fps", "150"],
+            assume_yes=True,
         )
-    assert "-- %command%" in caplog.text
+        == 0
+    )
+    (call,) = calls
+    assert call["steam"] is steam
+    assert call["name"] == "ROTK Launcher"
+    assert call["program"] == ["/bin/sul"]
+    assert call["mode"] == "rotk-launcher"
+    assert call["options"] == ["--max-fps", "150"]
+    assert call["launch"] is True
+    assert call["icon"] == rotk_launcher.icon_path()
+    assert call["assume_yes"] is True
 
 
-def test_the_prefixs_steam_folder_lists_the_library_the_game_is_in(
-    tmp_path: Path,
+def test_the_shortcut_is_not_started_if_that_is_declined(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    session, _ = _steam_launch(tmp_path)
+    _wire(monkeypatch, tmp_path, "")
+    calls: list[dict[str, object]] = []
 
-    class FakeSteam:
-        def game_library_path(self, game_id: str) -> Path:
-            del game_id
-            return Path("/mnt/storage/SteamLibrary")
+    def fake_ensure(_steam: object, **kwargs: object) -> int:
+        calls.append(kwargs)
+        return 1
 
-    for _ in range(2):  # the second time changes nothing
-        rotk_launcher._publish_game_library(
-            FakeSteam(), session  # type: ignore[arg-type]
+    monkeypatch.setattr(steam_shortcuts, "ensure_shortcut", fake_ensure)
+    assert (
+        rotk_launcher.launch(
+            steam=object(), start_shortcut=False  # type: ignore[arg-type]
         )
-    vdf = (
-        session.prefix
-        / "drive_c"
-        / "Program Files"
-        / "Steam"
-        / "steamapps"
-        / "libraryfolders.vdf"
-    ).read_text()
-    assert '"path"\t\t"Z:\\\\mnt\\\\storage\\\\SteamLibrary"' in vdf
-    assert '"433850"' in vdf
+        == 0
+    )
+    assert calls[0]["launch"] is False
+
+
+def test_a_shortcut_that_could_not_be_added_is_a_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _wire(monkeypatch, tmp_path, "")
+    monkeypatch.setattr(
+        steam_shortcuts, "ensure_shortcut", lambda *_a, **_k: None
+    )
+    assert rotk_launcher.launch(steam=object()) == 1  # type: ignore[arg-type]
+
+
+def test_the_launchers_mark_is_saved_for_the_shortcut(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(rotk_launcher, "XDG_DATA_ROOT", tmp_path / "data")
+    app = tmp_path / "ROTK Launcher" / "ROTK Launcher.exe"
+    (app.parent / "resources").mkdir(parents=True)
+    make_asar(
+        app.parent / "resources",
+        {"dist/branding/rotk-mark.png": b"PNG!", "dist/other.txt": b"x"},
+    )
+    assert rotk_launcher._save_icon(app)
+    assert rotk_launcher.icon_path().read_bytes() == b"PNG!"
+    assert rotk_launcher._save_icon(app)  # already there: still fine
+
+
+def test_a_launcher_without_the_mark_saves_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(rotk_launcher, "XDG_DATA_ROOT", tmp_path / "data")
+    app = tmp_path / "ROTK Launcher" / "ROTK Launcher.exe"
+    (app.parent / "resources").mkdir(parents=True)
+    make_asar(app.parent / "resources", {"dist/other.txt": b"x"})
+    assert not rotk_launcher._save_icon(app)
+    assert not rotk_launcher.icon_path().exists()
+    assert not rotk_launcher._save_icon(tmp_path / "missing" / "x.exe")
