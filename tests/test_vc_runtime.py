@@ -82,8 +82,9 @@ class _FakeSteam:
         self.commands: list[list[str]] = []
 
     def process_in_prefix(
-        self, command_line: list[str], *, game_id: str
+        self, command_line: list[str], *, game_id: str, session: object = None
     ) -> _FakeProcess:
+        del session
         assert game_id == "433850"
         self.commands.append(command_line)
         return _FakeProcess(lambda: self.on_run(command_line))

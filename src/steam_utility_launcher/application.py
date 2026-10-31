@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import tarfile
 from dataclasses import KW_ONLY, dataclass
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import __version__, hwid_access, svt_proton
-from .steam import Steam
+from .steam import CompatSession, Steam
 from .utilities import (
     dsr_gadget,
     hitman_peacock,
@@ -212,7 +213,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     rotk_launcher_parser = subparsers.add_parser(
         "rotk-launcher",
-        help="Install and run ROTK Launcher for Z1 Battle Royale.",
+        help=(
+            "Install and run ROTK Launcher for Z1 Battle Royale. On Linux this"
+            " wraps a Steam shortcut's launch: set the shortcut's launch"
+            " options to `steam-utility-launcher rotk-launcher -- %%command%%`."
+        ),
+    )
+    rotk_launcher_parser.add_argument(
+        "steam_command",
+        nargs="*",
+        metavar="COMMAND",
+        help=(
+            "Steam's command for the shortcut, which it puts where"
+            " `%%command%%` is in the launch options (after a `--`)."
+        ),
     )
     rotk_launcher_parser.add_argument(
         "--force",
@@ -391,6 +405,8 @@ def _launch_preset(  # noqa: PLR0913
     max_fps: int | None = None,
     vsync: int | None = None,
     no_steam_overlay: bool = False,
+    steam_command: list[str] | None = None,
+    session: CompatSession | None = None,
 ) -> int:
     if mode == "hitman-peacock":
         return hitman_peacock.launch(steam=steam)
@@ -409,6 +425,8 @@ def _launch_preset(  # noqa: PLR0913
             max_fps=max_fps,
             vsync=vsync,
             no_steam_overlay=no_steam_overlay,
+            steam_command=steam_command,
+            session=session,
         )
     if mode == "zemu":
         return zemu.launch(
@@ -495,5 +513,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_fps=getattr(args, "max_fps", None),
             vsync=getattr(args, "vsync", None),
             no_steam_overlay=getattr(args, "no_steam_overlay", False),
+            steam_command=getattr(args, "steam_command", None),
+            session=CompatSession.from_environment(os.environ),
         )
     return 0

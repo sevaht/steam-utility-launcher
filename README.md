@@ -47,21 +47,30 @@ After launching Dark Souls: Remastered, run SilkySouls:
 steam-utility-launcher silky-souls
 ```
 
-Install and run ROTK Launcher for Z1 Battle Royale:
-```bash
-steam-utility-launcher rotk-launcher
-```
+Install and run ROTK Launcher for Z1 Battle Royale. On Linux this is a
+wrapper in the launch options of a Steam shortcut, so Steam runs Proton (in its
+runtime container) as it does for any game:
 
-> **Linux note:** the game doesn't need to already be running for this one —
-> ROTK Launcher isn't a mod that attaches to a live game process, so it just
-> needs the game's Proton prefix to exist (i.e. the game has been launched
-> at least once before).
+1. In Steam, add a non-Steam game and name it, say, "ROTK Launcher". Its
+   target is never run, so any file will do, such as `/usr/bin/true`.
+2. Under its Properties > Compatibility, force **SVT-Proton-GE11** (see
+   [SVT-Proton](#svt-proton)).
+3. Set its launch options to:
+   ```
+   steam-utility-launcher rotk-launcher -- %command%
+   ```
+   Options of this program go before the `--`, for example
+   `steam-utility-launcher rotk-launcher --default-hud -- %command%`.
 
-> **Linux note:** the game has to be set to [SVT-Proton](#svt-proton) in
-> Steam. `rotk-launcher` refuses to start otherwise, because on other Protons
-> the game can hang while starting. Install it with
-> `steam-utility-launcher svt-proton`. To run with whatever Proton Steam uses
-> for the game anyway, add `--allow-any-proton`.
+The first launch makes the shortcut's own prefix, installs ROTK Launcher in it
+and sets it up; it takes a while. The game's files are copied by ROTK Launcher
+from the Steam library Z1 Battle Royale is installed in, so that must be
+installed. On Windows, run `steam-utility-launcher rotk-launcher` directly.
+
+> **Linux note:** the shortcut has to use [SVT-Proton](#svt-proton).
+> `rotk-launcher` refuses to start otherwise, because on other Protons the
+> game can hang while starting. To run with whatever Proton the shortcut uses
+> anyway, add `--allow-any-proton`.
 
 **Overlay.** Steam's overlay is left as Steam sets it up for the shortcut: turn
 it on in the shortcut's Properties and it works in the launcher and the game,
@@ -244,42 +253,27 @@ set by `rotk-launcher`; default `%TEMP%\sul-powershell-commands.log`) and
 
 #### SVT-Proton
 
-[SVT-Proton](https://github.com/sevaht/SVT-Proton) is Valve's Proton with a
-few fixes, under the same version number (SVT-Proton `11.0-2e` is Proton
-`11.0-2e` plus the fixes). The ones ROTK Launcher and Z1 Battle Royale depend
-on:
+SVT-Proton is [GE-Proton](https://github.com/GloriousEggroll/proton-ge-custom)
+with a few fixes
+([sevaht/SVT-proton-ge-custom](https://github.com/sevaht/SVT-proton-ge-custom),
+`SVT-Proton-GE11` is GE-Proton 11). The ones ROTK Launcher and Z1 Battle Royale
+depend on:
 
 - the game no longer hangs at start-up: ROTK's patch library can suspend the
   game's main thread while Wine is doing its one-time window setup, and
   SVT-Proton does that setup first (`rotk-launcher` asks for it with
-  `PROTON_SVT_EAGER_DESKTOP`);
-- the launcher's frameless window is sized correctly (no blank strip, no thick
-  borders, no window-manager title bar it never asked for), and dragging it by
-  its own title bar no longer leaves the window manager stuck in a move.
+  `PROTON_EAGER_DESKTOP`);
+- dragging a window by its own title bar no longer leaves the window manager
+  stuck in a move.
 
-```bash
-steam-utility-launcher svt-proton
-```
+Download a release from that repository's releases page and unpack it into
+`~/.local/share/Steam/compatibilitytools.d/`, then restart Steam so it lists
+**SVT-Proton-GE11**. (`steam-utility-launcher svt-proton` still installs the
+older, Valve-based SVT-Proton 11.0; it doesn't fetch this one yet.)
 
-This installs the latest release into Steam's folder for tools you add
-yourself (`~/.local/share/Steam/compatibilitytools.d/SVT-Proton-11.0`) and
-updates it to the latest release when one is out; run it again whenever
-`rotk-launcher` says an update is available (that check is made at most once
-a day and only logs a warning). The download is checked against the release's
-`SHA256SUMS.txt`, unpacked beside the destination, and swapped in as a whole,
-so a failed download or update leaves what is installed alone. `--force`
-reinstalls even if it is up to date. There is only an x86_64 build, the same as
-Valve's Proton.
-
-Then restart Steam and, for Z1 Battle Royale, choose **SVT-Proton-11.0** under
-Properties > Compatibility. This tool doesn't change that choice for you:
-Steam keeps its configuration in memory and writes it back when it exits.
-Close the game before updating it.
-
-Unless the game is set to SVT-Proton, `rotk-launcher` says why and exits
+Unless the shortcut uses SVT-Proton, `rotk-launcher` says why and exits
 without starting or installing anything. `--allow-any-proton` skips that
-requirement and runs with whatever Proton Steam uses for the game, as it does
-for the other tools (the game may hang while starting).
+requirement (the game may hang while starting).
 
 #### Visual C++ runtime
 

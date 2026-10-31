@@ -312,6 +312,34 @@ class CompatibilityTool:
         ]
 
 
+@dataclass(frozen=True)
+class CompatSession:
+    """What Steam tells a program that wraps a game's launch command (the
+    launch option `program %command%`): the prefix of the shortcut being
+    launched, and the compatibility tool it runs with.
+
+    Steam sets these in the environment of the wrapper, which runs natively,
+    before the command that starts Proton in Steam's runtime container.
+    """
+
+    compat_data_path: Path
+    tool_directory: Path
+
+    @property
+    def prefix(self) -> Path:
+        return self.compat_data_path / "pfx"
+
+    @classmethod
+    def from_environment(cls, env: Mapping[str, str]) -> CompatSession | None:
+        data_path = env.get("STEAM_COMPAT_DATA_PATH")
+        # The tool, then the runtime it runs in, separated like a PATH.
+        tool_paths = env.get("STEAM_COMPAT_TOOL_PATHS", "")
+        tool_directory = tool_paths.split(":")[0]
+        if not data_path or not tool_directory:
+            return None
+        return cls(Path(data_path), Path(tool_directory))
+
+
 @dataclass
 class SteamLocation:
     root: Path
@@ -518,8 +546,24 @@ class Steam:
     def game_wine_prefix(self, *, game_id: str) -> Path:
         return self.game_compatdata_path(game_id=game_id) / "pfx"
 
-    def _ensure_steamapps_mapping(self, *, game_id: str) -> None:
-        dosdevices = self.game_wine_prefix(game_id=game_id) / "dosdevices"
+    def tool_for_session(
+        self, session: CompatSession
+    ) -> CompatibilityTool | None:
+        """The installed tool Steam says the launch runs with."""
+        wanted = session.tool_directory.resolve()
+        for tool in self.compatibility_tools:
+            if tool.install_path.resolve() == wanted:
+                return tool
+        return None
+
+    def _ensure_steamapps_mapping(
+        self, *, game_id: str, prefix: Path | None = None
+    ) -> None:
+        """Makes drive S: of the prefix (the game's own, unless one is given)
+        the Steam library the game is in."""
+        if prefix is None:
+            prefix = self.game_wine_prefix(game_id=game_id)
+        dosdevices = prefix / "dosdevices"
         dosdevices.mkdir(parents=True, exist_ok=True)
         drive_s = dosdevices / "s:"
         target = self.game_library_path(game_id=game_id)
@@ -570,7 +614,7 @@ class Steam:
         matched_tools = self.matching_compatibility_tools(tool_name)
         return matched_tools[0] if len(matched_tools) == 1 else None
 
-    def process_in_prefix(
+    def process_in_prefix(  # noqa: PLR0913
         self,
         command_line: list[str],
         *,
@@ -578,8 +622,12 @@ class Steam:
         cwd: Path | None = None,
         system_wine: bool = False,
         via_proton_script: bool = False,
+        session: CompatSession | None = None,
     ) -> Process:
-        """Prepares a process to run in the game's Proton prefix.
+        """Prepares a process to run in a Proton prefix: the game's, or, given
+        a `session`, the one Steam made for the launch that is being wrapped,
+        with the tool it runs with (`game_id` is then only what the process
+        tells Steam it is, and the library the S: drive is made to show).
 
         By default Proton's bare `wine` is used, which suits utilities that
         only need the prefix (and this adds the DLL overrides a game needs).
@@ -594,43 +642,37 @@ class Steam:
         env = os.environ.copy()
         is_wine = False
         prefix_runner: list[str] | None = None
+        if session is not None:
+            prefix = session.prefix
+            compat_data_path = session.compat_data_path
+        else:
+            prefix = self.game_wine_prefix(game_id=game_id)
+            compat_data_path = self.game_compatdata_path(game_id=game_id)
         if system_wine:
             is_wine = True
             command_line = ["wine", *command_line]
             prefix_runner = ["wine"]
         else:
-            tool_name = self.game_compatibility_tool(game_id)
-            if tool_name:
-                matched_tools = self.matching_compatibility_tools(tool_name)
-                if not matched_tools:
-                    msg = f"No compatibility tools matched: {tool_name}"
-                    raise RuntimeError(msg)
-                if len(matched_tools) > 1:
-                    msg = f"Multiple compatibility tools matched: {tool_name}"
-                    raise RuntimeError(msg)
-                tool = matched_tools[0]
-                if tool.is_proton():
-                    is_wine = True
-                    prefix_runner, command_line = self._proton_launch_command(
-                        tool=tool,
-                        command_line=command_line,
-                        via_script=via_proton_script,
-                    )
-                    self._add_proton_environment(
-                        env,
-                        tool=tool,
-                        game_id=game_id,
-                        via_script=via_proton_script,
-                    )
+            tool = self._tool_to_run_with(game_id=game_id, session=session)
+            if tool is not None and tool.is_proton():
+                is_wine = True
+                prefix_runner, command_line = self._proton_launch_command(
+                    tool=tool,
+                    command_line=command_line,
+                    via_script=via_proton_script,
+                )
+                self._add_proton_environment(
+                    env, tool=tool, prefix=prefix, via_script=via_proton_script
+                )
         if is_wine:
-            self._ensure_steamapps_mapping(game_id=game_id)
-            compat_data_path = self.game_compatdata_path(game_id=game_id)
+            if session is None:  # Proton drops the S: drive of a shortcut
+                self._ensure_steamapps_mapping(game_id=game_id, prefix=prefix)
             env.update(
                 {
                     "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(
                         self.location.root
                     ),
-                    "WINEPREFIX": str(self.game_wine_prefix(game_id=game_id)),
+                    "WINEPREFIX": str(prefix),
                     "STEAM_COMPAT_DATA_PATH": str(compat_data_path),
                     "SteamAppId": game_id,
                     "SteamGameId": game_id,
@@ -652,17 +694,40 @@ class Steam:
             prefix_runner=prefix_runner,
         )
 
+    def _tool_to_run_with(
+        self, *, game_id: str, session: CompatSession | None
+    ) -> CompatibilityTool | None:
+        """The tool to run a process in the prefix with: the one the session
+        says, or else the one Steam is set to run the game with."""
+        if session is not None:
+            tool = self.tool_for_session(session)
+            if tool is None:
+                msg = f"No compatibility tool at: {session.tool_directory}"
+                raise RuntimeError(msg)
+            return tool
+        tool_name = self.game_compatibility_tool(game_id)
+        if not tool_name:
+            return None
+        matched_tools = self.matching_compatibility_tools(tool_name)
+        if not matched_tools:
+            msg = f"No compatibility tools matched: {tool_name}"
+            raise RuntimeError(msg)
+        if len(matched_tools) > 1:
+            msg = f"Multiple compatibility tools matched: {tool_name}"
+            raise RuntimeError(msg)
+        return matched_tools[0]
+
     def _add_proton_environment(
         self,
         env: dict[str, str],
         *,
         tool: CompatibilityTool,
-        game_id: str,
+        prefix: Path,
         via_script: bool,
     ) -> None:
         env["PROTON_DIR"] = str(tool.binary_path.parent)
         if not via_script:  # the script sets these itself
-            _add_proton_overrides(env, self.game_wine_prefix(game_id=game_id))
+            _add_proton_overrides(env, prefix)
 
     def _proton_launch_command(
         self,

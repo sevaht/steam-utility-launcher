@@ -14,7 +14,7 @@ from steam_utility_launcher.github_release_updater import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from steam_utility_launcher.steam import Steam
+    from steam_utility_launcher.steam import CompatSession, Steam
 
 logger = logging.getLogger(__name__)
 
@@ -129,15 +129,18 @@ def _cached_installer(redist: _Redistributable) -> Path:
     return installer
 
 
-def _run_installer(
+def _run_installer(  # noqa: PLR0913
     steam: Steam,
     game_id: str,
     redist: _Redistributable,
     installer: Path,
     mode: str,
+    session: CompatSession | None,
 ) -> None:
     process = steam.process_in_prefix(
-        [str(installer), mode, "/quiet", "/norestart"], game_id=game_id
+        [str(installer), mode, "/quiet", "/norestart"],
+        game_id=game_id,
+        session=session,
     )
     return_code = process.start().wait()
     if return_code not in _ACCEPTED_EXIT_CODES:
@@ -149,9 +152,16 @@ def _run_installer(
         )
 
 
-def ensure_current(*, steam: Steam, prefix: Path, game_id: str) -> None:
-    """Installs Microsoft's Visual C++ runtime into the game's prefix, but only
-    if its msvcp140.dll is missing or older than MINIMUM_VERSION.
+def ensure_current(
+    *,
+    steam: Steam,
+    prefix: Path,
+    game_id: str,
+    session: CompatSession | None = None,
+) -> None:
+    """Installs Microsoft's Visual C++ runtime into the prefix (the game's, or
+    the one of `session`), but only if its msvcp140.dll is missing or older
+    than MINIMUM_VERSION.
 
     Runs Microsoft's own installer inside the prefix, the same thing
     `winetricks vcrun2022` does (without its manual msvcp140.dll extraction,
@@ -173,7 +183,7 @@ def ensure_current(*, steam: Steam, prefix: Path, game_id: str) -> None:
                 mode,
                 file_version(_msvcp140(prefix, redist)) or "none",
             )
-            _run_installer(steam, game_id, redist, installer, mode)
+            _run_installer(steam, game_id, redist, installer, mode, session)
     remaining = outdated_redistributables(prefix)
     if remaining:
         details = ", ".join(

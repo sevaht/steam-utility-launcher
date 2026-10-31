@@ -22,7 +22,7 @@ from .github_release_updater import (
 
 if TYPE_CHECKING:
     from .github_release_updater import Release
-    from .steam import CompatibilityTool, Steam
+    from .steam import CompatibilityTool, CompatSession, Steam
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +262,52 @@ def _problem(
         "ROTK Launcher needs SVT-Proton, a Proton build with fixes the game"
         f" needs to start reliably. {detail}{override}"
     )
+
+
+def ensure_session_uses(
+    steam: Steam,
+    session: CompatSession,
+    *,
+    override_flag: str,
+    allow_any: bool,
+) -> bool:
+    """Whether to go on, for a launch Steam is running with the tool in
+    `session`: it is SVT-Proton, or `allow_any` says to use whatever it is.
+    Otherwise says why not (and how to fix it)."""
+    tool = steam.tool_for_session(session)
+    if tool is not None and is_svt_proton(tool):
+        # No update hint here: it looks at the releases of the Valve-based
+        # SVT-Proton, and would name an update for any other build of it.
+        return True
+    current = (
+        tool.internal_name if tool is not None else session.tool_directory.name
+    )
+    svt_names = [
+        known.internal_name
+        for known in steam.compatibility_tools
+        if is_svt_proton(known)
+    ]
+    detail = (
+        f"It is set to run with {current}, not SVT-Proton. Choose"
+        f" {' or '.join(svt_names)} under the shortcut's Properties >"
+        " Compatibility."
+        if svt_names
+        else f"It is set to run with {current}, and SVT-Proton isn't installed."
+    )
+    issue = (
+        "ROTK Launcher needs SVT-Proton, a Proton build with fixes the game"
+        f" needs to start reliably. {detail} To use {current} anyway (the"
+        f" game may hang while starting), pass {override_flag}."
+    )
+    if not allow_any:
+        logger.error(issue)
+        return False
+    logger.warning(
+        "This is not running with SVT-Proton (%s was passed): the game may"
+        " hang while starting.",
+        override_flag,
+    )
+    return True
 
 
 def warn_if_update_available(tool: CompatibilityTool) -> None:

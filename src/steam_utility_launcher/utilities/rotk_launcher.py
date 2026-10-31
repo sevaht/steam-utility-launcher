@@ -23,15 +23,32 @@ from steam_utility_launcher.github_release_updater import (
     Release,
     https_get,
 )
-from steam_utility_launcher.steam import Process, Steam
+from steam_utility_launcher.steam import CompatSession, Process, Steam
 from steam_utility_launcher.wine_prefix_patches import ensure_wine_patches
 
 logger = logging.getLogger(__name__)
 
-# Z1 Battle Royale, formerly H1Z1; ROTK Launcher is run in its Proton prefix.
+# Z1 Battle Royale, formerly H1Z1: the game ROTK Launcher starts. Its files are
+# what ROTK Launcher copies (from the Steam library the game is in), and what
+# the processes tell Steam they are, so the game finds the Steam it is
+# running under. ROTK Launcher itself has a prefix of its own: the one Steam
+# makes for the shortcut that runs this program (see launch()).
 GAME_ID = "433850"
-# Waives the requirement that the game's Proton be SVT-Proton.
+# Waives the requirement that the Proton ROTK Launcher runs with be SVT-Proton.
 ALLOW_ANY_PROTON_FLAG = "--allow-any-proton"
+# What Steam's command for the shortcut has before the program to run
+# (<proton> <verb> <program> <arguments>): Proton's script and its verb.
+_PROTON_COMMAND_LENGTH = 2
+# The program that has Proton make the prefix and does nothing else.
+_PREFIX_MAKER = ["cmd", "/c", "exit"]
+_SETUP_HELP = (
+    "ROTK Launcher is started by Steam, with Proton: this program wraps the"
+    " launch. In Steam, open the shortcut's Properties and set Compatibility"
+    " to SVT-Proton, and the launch options to:\n"
+    "    steam-utility-launcher rotk-launcher -- %command%\n"
+    "(add any options of this program before the --). The shortcut's target"
+    " is not used: any file will do."
+)
 _ASSET_PATTERN = re.compile(r"ROTK-Launcher-[0-9]+(\.[0-9]+)*-x64\.exe")
 _CHECKSUMS_ASSET_NAME = Path("SHA256SUMS.txt")
 _CHECKSUM_LINE_PART_COUNT = 2
@@ -62,7 +79,7 @@ _OVERLAY_LIBRARY = "gameoverlayrenderer"
 # Proton build with a small Wine change) does that setup at process start for
 # the program(s) named here; other Proton builds ignore the setting.
 _GAME_EXECUTABLE = "H1Z1.exe"
-_EAGER_DESKTOP = {"PROTON_SVT_EAGER_DESKTOP": _GAME_EXECUTABLE}
+_EAGER_DESKTOP = {"PROTON_EAGER_DESKTOP": _GAME_EXECUTABLE}
 
 # Settings for DXVK in the game are passed in DXVK_CONFIG, in a section for the
 # game's executable: every DXVK process gets the variable (the game inherits
@@ -188,7 +205,11 @@ def _tpm_environment(*, tpm: bool, endorsement: bool) -> dict[str, str]:
 
 
 def _prepare_tpm(
-    *, steam: Steam | None, prefix: Path, endorsement: bool
+    *,
+    steam: Steam | None,
+    prefix: Path,
+    session: CompatSession | None,
+    endorsement: bool,
 ) -> bool:
     """Has the stand-in create the TPM keys once and, for AMD TPMs with
     `--tpm-endorsement`, saves the endorsement key certificate chain AMD
@@ -202,6 +223,7 @@ def _prepare_tpm(
                     steam,
                     prefix,
                     [_STAND_IN_WINE_PATH, _PREPARE_FLAG],
+                    session=session,
                     disable_powershell=False,
                     extra_env={
                         _TPM_DIR_ENV_VAR: powershell_log.wine_path(directory)
@@ -233,13 +255,151 @@ def _require_steam(steam: Steam | None) -> Steam:
     return steam
 
 
-def _resolve_app_path(steam: Steam | None) -> tuple[Path | None, Path]:
+def _require_session(session: CompatSession | None) -> CompatSession:
+    if not session:
+        msg = "a Steam launch (a session) must be provided on linux!"
+        raise AssertionError(msg)
+    return session
+
+
+def _require_steam_command(steam_command: list[str] | None) -> list[str]:
+    if not steam_command:
+        msg = "Steam's command for the launch must be provided on linux!"
+        raise AssertionError(msg)
+    return steam_command
+
+
+def _resolve_app_path(
+    session: CompatSession | None,
+) -> tuple[Path | None, Path]:
+    """The prefix (on Linux: the one Steam made for the shortcut being
+    launched) and where ROTK Launcher is, or is to be, installed in it."""
     if sys.platform.startswith("linux"):
-        prefix = _require_steam(steam).game_wine_prefix(game_id=GAME_ID)
-        program_files = prefix / "drive_c" / "Program Files"
-        return prefix, program_files / "ROTK Launcher" / "ROTK Launcher.exe"
+        if session is None:
+            msg = "a Steam launch (a session) must be provided on linux!"
+            raise AssertionError(msg)
+        program_files = session.prefix / "drive_c" / "Program Files"
+        return (
+            session.prefix,
+            program_files / "ROTK Launcher" / "ROTK Launcher.exe",
+        )
     program_files = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
     return None, program_files / "ROTK Launcher" / "ROTK Launcher.exe"
+
+
+def _command_with_program(
+    steam_command: list[str], session: CompatSession, program: list[str]
+) -> list[str]:
+    """Steam's command for the shortcut (everything the launch option
+    `%command%` stands for: Steam's own wrappers, the runtime's entry point,
+    Proton's script and its verb, and the program with its arguments), with
+    `program` to run instead of the shortcut's target. Everything before the
+    program is Steam's, so ROTK Launcher is started exactly as Steam would
+    start the game, in the runtime's container."""
+    tool_directory = session.tool_directory.resolve()
+    for index, argument in enumerate(steam_command):
+        path = Path(argument)
+        if path.name == "proton" and path.parent.resolve() == tool_directory:
+            return [*steam_command[: index + _PROTON_COMMAND_LENGTH], *program]
+    msg = (
+        f"Steam's command doesn't run Proton from {tool_directory}:"
+        f" {steam_command}"
+    )
+    raise RuntimeError(msg)
+
+
+def _make_prefix(steam_command: list[str], session: CompatSession) -> bool:
+    """Has Proton make the shortcut's prefix, if it is not made yet, by
+    running Steam's command for a program that does nothing; so the prefix is
+    made by the Proton the game runs with, in the container, as Steam makes
+    one. Proton writes `version` in the folder when it has set one up."""
+    if (session.compat_data_path / "version").exists():
+        return True
+    logger.info("Making the prefix with Proton: %s", session.prefix)
+    code = (
+        Process(
+            command_line=_command_with_program(
+                steam_command, session, _PREFIX_MAKER
+            ),
+            env=os.environ.copy(),
+        )
+        .start()
+        .wait()
+    )
+    if code != 0 or not (session.compat_data_path / "version").exists():
+        logger.error(
+            "Proton did not make the prefix %s (exit status %d; the reason"
+            " is above).",
+            session.prefix,
+            code,
+        )
+        return False
+    return True
+
+
+def _publish_game_library(steam: Steam, session: CompatSession) -> None:
+    """Has a Steam folder in the prefix list the library Z1 Battle Royale is
+    in, so ROTK Launcher (which looks for Steam in the registry and in the
+    Program Files folders) finds the game's files by itself. The library is
+    named by its Z: path, which the container shows (see
+    `_mount_game_library`). It is in `Program Files`, not where Proton makes
+    its own Steam folder: Proton rewrites that one's library list on every
+    start, and drops the S: drive of a shortcut."""
+    steamapps = (
+        session.prefix / "drive_c" / "Program Files" / "Steam" / "steamapps"
+    )
+    library = str(steam.game_library_path(game_id=GAME_ID))
+    wine_path = "Z:" + library.replace("/", "\\")
+    escaped = wine_path.replace("\\", "\\\\")  # VDF escapes backslashes
+    content = (
+        '"libraryfolders"\n{\n\t"0"\n\t{\n'
+        f'\t\t"path"\t\t"{escaped}"\n'
+        f'\t\t"apps"\n\t\t{{\n\t\t\t"{GAME_ID}"\t\t"0"\n\t\t}}\n'
+        "\t}\n}\n"
+    )
+    target = steamapps / "libraryfolders.vdf"
+    try:
+        steamapps.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or target.read_text() != content:
+            target.write_text(content)
+    except OSError:
+        logger.warning(
+            "Could not list the Z1 Battle Royale library in the prefix; pick"
+            " the game's folder in ROTK Launcher yourself.",
+            exc_info=True,
+        )
+
+
+def _mount_game_library(env: dict[str, str], steam: Steam) -> None:
+    """Has the container show the Steam library the game is in (Steam only
+    names its own), as ROTK Launcher is to copy the game's files."""
+    library = str(steam.game_library_path(game_id=GAME_ID))
+    mounts = [m for m in env.get("STEAM_COMPAT_MOUNTS", "").split(":") if m]
+    if library not in mounts:
+        env["STEAM_COMPAT_MOUNTS"] = ":".join([*mounts, library])
+
+
+def _game_process(
+    steam: Steam,
+    session: CompatSession,
+    steam_command: list[str],
+    app_path: Path,
+    *,
+    extra_env: dict[str, str],
+) -> Process:
+    """ROTK Launcher as the game: Steam's own command, run with the
+    environment the program needs. It runs as the game Z1 Battle Royale as
+    far as Steam's API goes."""
+    env = os.environ.copy()
+    env.update({"SteamAppId": GAME_ID, "SteamGameId": GAME_ID})
+    _mount_game_library(env, steam)
+    env.update(extra_env)
+    return Process(
+        command_line=_command_with_program(
+            steam_command, session, [str(app_path)]
+        ),
+        env=env,
+    )
 
 
 def _run_in_context(  # noqa: PLR0913
@@ -247,13 +407,15 @@ def _run_in_context(  # noqa: PLR0913
     prefix: Path | None,
     command_line: list[str],
     *,
+    session: CompatSession | None = None,
     disable_powershell: bool = True,
     extra_env: dict[str, str] | None = None,
-    as_game: bool = False,
 ) -> Process:
+    """A process that needs the prefix (an installer, the TPM set-up) and not
+    the game's complete environment: it runs with Proton's bare wine."""
     if prefix is not None:
         process = _require_steam(steam).process_in_prefix(
-            command_line, game_id=GAME_ID, via_proton_script=as_game
+            command_line, game_id=GAME_ID, session=session
         )
         if extra_env and process.env is not None:
             process.env.update(extra_env)
@@ -339,7 +501,12 @@ def _download_installer(
 
 
 def _install_if_needed(
-    *, steam: Steam | None, prefix: Path | None, app_path: Path, force: bool
+    *,
+    steam: Steam | None,
+    prefix: Path | None,
+    session: CompatSession | None,
+    app_path: Path,
+    force: bool,
 ) -> None:
     install_directory = XDG_DATA_ROOT / "ROTK-Launcher"
     install_directory.mkdir(parents=True, exist_ok=True)
@@ -376,7 +543,7 @@ def _install_if_needed(
         installer_path = Path(staging_dir) / asset_name.name
         _download_installer(release, asset_name, installer_path)
         installer_process = _run_in_context(
-            steam, prefix, [str(installer_path), "/S"]
+            steam, prefix, [str(installer_path), "/S"], session=session
         )
         return_code = installer_process.start().wait()
     if return_code != 0:
@@ -387,6 +554,34 @@ def _install_if_needed(
         raise RuntimeError(msg)
     tag_file.write_text(release.tag)
     logger.info('Installed ROTK Launcher "%s".', release.tag)
+
+
+def _checks_pass(
+    steam: Steam | None,
+    session: CompatSession,
+    *,
+    allow_any_proton: bool,
+    tpm: bool,
+) -> bool:
+    """Whether the launch may go on, before anything is downloaded, installed
+    or started. Says why not if it may not."""
+    # The tool has to be SVT-Proton, which has the Wine fixes the game needs
+    # to start reliably, unless that is waived.
+    if not svt_proton.ensure_session_uses(
+        _require_steam(steam),
+        session,
+        override_flag=ALLOW_ANY_PROTON_FLAG,
+        allow_any=allow_any_proton,
+    ):
+        return False
+    # If the hardware check can't be answered completely, don't go on at all.
+    problem = hwid_access.access_problem()
+    # TPM attestation is opt-in; once asked for it has to work.
+    problem = problem or (hwid_access.tpm_problem() if tpm else None)
+    if problem is not None:
+        logger.error(problem)
+        return False
+    return True
 
 
 def launch(  # noqa: PLR0913
@@ -400,47 +595,58 @@ def launch(  # noqa: PLR0913
     max_fps: int | None = None,
     vsync: int | None = None,
     no_steam_overlay: bool = False,
+    steam_command: list[str] | None = None,
+    session: CompatSession | None = None,
 ) -> int:
+    """Installs ROTK Launcher if needed and runs it.
+
+    On Linux this is a wrapper in the launch options of a Steam shortcut
+    (`steam-utility-launcher rotk-launcher -- %command%`) that has a
+    compatibility tool: Steam makes the prefix and builds the command that
+    runs Proton in its runtime container (`steam_command`), and this prepares
+    the prefix, then has Steam's command run ROTK Launcher in place of the
+    shortcut's target. `session` is what Steam tells it of the launch.
+    """
     tpm = tpm or tpm_endorsement
-    prefix, app_path = _resolve_app_path(steam)
-    if prefix is not None:
-        # The game has to run on SVT-Proton, which has the Wine fixes it needs
-        # to start reliably, unless that is waived. Nothing else is done
-        # before this: nothing is downloaded, installed or started.
-        if not svt_proton.ensure_game_uses(
-            _require_steam(steam),
-            GAME_ID,
-            game_name="Z1 Battle Royale",
-            override_flag=ALLOW_ANY_PROTON_FLAG,
-            allow_any=allow_any_proton,
-        ):
-            return 1
-        # Next, before anything is downloaded, installed or started: if the
-        # hardware check can't be answered completely, don't go on at all.
-        problem = hwid_access.access_problem()
-        if problem is not None:
-            logger.error(problem)
-            return 1
-        # TPM attestation is opt-in; once asked for it has to work.
-        tpm_problem = hwid_access.tpm_problem() if tpm else None
-        if tpm_problem is not None:
-            logger.error(tpm_problem)
-            return 1
+    if sys.platform.startswith("linux") and (not steam_command or not session):
+        logger.error(_SETUP_HELP)
+        return 1
+    prefix, app_path = _resolve_app_path(session)
+    if prefix is not None and not _checks_pass(
+        steam,
+        _require_session(session),
+        allow_any_proton=allow_any_proton,
+        tpm=tpm,
+    ):
+        return 1
     ps_log = powershell_log.path() if prefix is not None else None
     if ps_log is not None:
         print(
             f"PowerShell commands the app runs are logged to: {ps_log}",
             file=sys.stderr,
         )
+    if prefix is not None and not _make_prefix(
+        _require_steam_command(steam_command), _require_session(session)
+    ):
+        return 1
+    if prefix is not None:
+        _publish_game_library(_require_steam(steam), _require_session(session))
     _install_if_needed(
-        steam=steam, prefix=prefix, app_path=app_path, force=force
+        steam=steam,
+        prefix=prefix,
+        session=session,
+        app_path=app_path,
+        force=force,
     )
     if prefix is None or ps_log is None:
         return _run_in_context(steam, prefix, [str(app_path)]).start().wait()
     # ROTK's anti-cheat needs a Visual C++ runtime newer than the 2016 one that
-    # Steam's redistributable installer leaves in the game's prefix.
+    # Steam's redistributable installer leaves in a game's prefix.
     vc_runtime.ensure_current(
-        steam=_require_steam(steam), prefix=prefix, game_id=GAME_ID
+        steam=_require_steam(steam),
+        prefix=prefix,
+        game_id=GAME_ID,
+        session=session,
     )
     # The app itself needs a working answer to its hardware fingerprint query
     # (PowerShell/WMI), which Wine's stub can't give; see wine_prefix_patches.
@@ -450,18 +656,21 @@ def launch(  # noqa: PLR0913
     # the DLL override that disables PowerShell isn't used here.
     ensure_wine_patches(prefix)
     if tpm and not _prepare_tpm(
-        steam=steam, prefix=prefix, endorsement=tpm_endorsement
+        steam=steam,
+        prefix=prefix,
+        session=session,
+        endorsement=tpm_endorsement,
     ):
         return 1
     logged_before = powershell_log.size(ps_log)
-    process = _run_in_context(
-        steam,
-        prefix,
-        [str(app_path)],
-        disable_powershell=False,
-        # ROTK Launcher is the game itself (it starts H1Z1.exe), so it runs
-        # exactly as Steam would run the game: through Proton's own script.
-        as_game=True,
+    # ROTK Launcher is the game itself (it starts H1Z1.exe), so it runs
+    # exactly as Steam would run the game: Steam's own command, in the
+    # runtime's container, with the environment it needs added.
+    process = _game_process(
+        _require_steam(steam),
+        _require_session(session),
+        _require_steam_command(steam_command),
+        app_path,
         extra_env={
             powershell_log.ENV_VAR: powershell_log.wine_path(ps_log),
             **(_STEAM_OVERLAY_OFF if no_steam_overlay else {}),
