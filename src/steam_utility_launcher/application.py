@@ -11,7 +11,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import __version__, hwid_access, svt_proton
+from . import __version__, hwid_access, proton_tools
 from .steam import CompatSession, Steam
 from .utilities import (
     dsr_gadget,
@@ -261,9 +261,9 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Run with whatever Proton Steam uses for Z1 Battle Royale even if"
-            " it isn't SVT-Proton. Without this, ROTK Launcher refuses to"
-            " start unless the game is set to SVT-Proton (see the"
-            " svt-proton command), since the game can hang while starting"
+            " it isn't SVT-GE-Proton. Without this, ROTK Launcher refuses to"
+            " start unless the game is set to SVT-GE-Proton (see the"
+            " proton command), since the game can hang while starting"
             " on other Protons."
         ),
     )
@@ -339,17 +339,33 @@ def _build_parser() -> argparse.ArgumentParser:
             " requiring it."
         ),
     )
-    svt_proton_parser = subparsers.add_parser(
-        "svt-proton",
+    proton_parser = subparsers.add_parser(
+        "proton",
         help=(
-            "Install SVT-Proton, the Proton build ROTK Launcher needs, in"
-            " Steam, or update it to the latest release."
+            "Install a Proton build in Steam, or update it to the latest"
+            " release. Without a name, lists what can be installed."
         ),
     )
-    svt_proton_parser.add_argument(
+    proton_parser.add_argument(
+        "name",
+        nargs="?",
+        choices=[source.key for source in proton_tools.SOURCES],
+        help=(
+            "ge: GE-Proton; svt-ge: SVT-GE-Proton, GE-Proton with the fixes"
+            " ROTK Launcher needs."
+        ),
+    )
+    proton_parser.add_argument(
+        "--tag",
+        default="",
+        help=(
+            "Install this release (e.g. GE-Proton10-4) instead of the latest."
+        ),
+    )
+    proton_parser.add_argument(
         "--force",
         action="store_true",
-        help="Install the latest release even if it is already installed.",
+        help="Install even if it is already installed.",
     )
     zemu_parser = subparsers.add_parser(
         "zemu",
@@ -475,14 +491,31 @@ def _launch_preset(  # noqa: PLR0913
     raise NotImplementedError
 
 
-def _install_svt_proton(*, force: bool) -> int:
+def _install_proton(*, name: str | None, tag: str, force: bool) -> int:
     if sys.platform != "linux":
-        logger.error("SVT-Proton is for Steam on Linux.")
+        logger.error("Proton is for Steam on Linux.")
         return 1
     try:
-        svt_proton.install(Steam.from_detection(), force=force)
+        steam = Steam.from_detection()
+        if name is None:
+            for source in proton_tools.SOURCES:
+                found = proton_tools.installed_in(steam, source)
+                print(
+                    f"{source.key:7} {source.title}"
+                    f" (https://github.com/{source.repository})"
+                    + (
+                        ": installed: "
+                        + ", ".join(tool.internal_name for tool in found)
+                        if found
+                        else ""
+                    )
+                )
+            return 0
+        proton_tools.install(
+            steam, proton_tools.source_for_key(name), tag=tag, force=force
+        )
     except (OSError, RuntimeError, ValueError, tarfile.TarError) as error:
-        logger.error("Could not install SVT-Proton: %s", error)  # noqa: TRY400
+        logger.error("Could not install Proton: %s", error)  # noqa: TRY400
         return 1
     return 0
 
@@ -520,8 +553,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return return_code
     elif args.mode == "enable-hwid-access":
         return hwid_access.run(disable=args.disable, assume_yes=args.yes)
-    elif args.mode == "svt-proton":
-        return _install_svt_proton(force=args.force)
+    elif args.mode == "proton":
+        return _install_proton(name=args.name, tag=args.tag, force=args.force)
     elif args.mode == "prefix-path":
         steam = Steam.from_detection()
         game_id = _resolve_game_id(args)

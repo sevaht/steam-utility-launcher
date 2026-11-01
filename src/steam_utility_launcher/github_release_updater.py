@@ -88,10 +88,12 @@ def https_get(url: str) -> tuple[int, bytes]:
         return response.status, response.read()
 
 
-def https_download(url: str, destination: Path) -> str:
+def https_download(
+    url: str, destination: Path, algorithm: str = "sha256"
+) -> str:
     """Saves the URL to a file without holding it in memory, and returns the
-    SHA-256 of what was saved (as hex)."""
-    digest = hashlib.sha256()
+    digest of what was saved (SHA-256 unless told otherwise, as hex)."""
+    digest = hashlib.new(algorithm)
     with _https_response(url) as response:
         if response.status != HTTP_STATUS_OK:
             _raise_http_status_error(url, response.status)

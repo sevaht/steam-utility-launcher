@@ -8,7 +8,7 @@ from steam_utility_launcher import (
     hwid_access,
     powershell_log,
     steam_shortcuts,
-    svt_proton,
+    svt_ge_proton,
     vc_runtime,
 )
 from steam_utility_launcher.steam import CompatSession
@@ -74,7 +74,7 @@ def _wire(
         return bool(seen.get("proton_ok", True))
 
     monkeypatch.setattr(
-        svt_proton, "ensure_session_uses", fake_ensure_session_uses
+        svt_ge_proton, "ensure_session_uses", fake_ensure_session_uses
     )
     monkeypatch.setattr(rotk_launcher, "_make_prefix", lambda *_: True)
     monkeypatch.setattr(
@@ -279,7 +279,7 @@ def test_only_the_steam_overlay_is_removed_from_ld_preload() -> None:
     assert unset == {}
 
 
-def test_the_app_asks_svt_proton_for_the_early_window_setup(
+def test_the_app_asks_svt_ge_proton_for_the_early_window_setup(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     seen = _wire(monkeypatch, tmp_path, "")
@@ -451,7 +451,7 @@ def test_the_games_proton_is_checked_before_anything_else(
     ]
 
 
-def test_nothing_is_started_when_the_game_does_not_use_svt_proton(
+def test_nothing_is_started_when_the_game_does_not_use_svt_ge_proton(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     seen = _wire(monkeypatch, tmp_path, "")
@@ -546,7 +546,7 @@ def test_prepare_reports_a_failed_set_up_as_an_error(
 
 
 def _steam_launch(tmp_path: Path) -> tuple[CompatSession, list[str]]:
-    tool = tmp_path / "tools" / "SVT-Proton-GE11"
+    tool = tmp_path / "tools" / "SVT-GE-Proton-11"
     tool.mkdir(parents=True)
     session = CompatSession(tmp_path / "compatdata" / "9", tool)
     command = [

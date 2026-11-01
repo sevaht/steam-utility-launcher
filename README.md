@@ -54,7 +54,7 @@ any game. Run the command on its own and it sets the shortcut up and starts it:
 steam-utility-launcher rotk-launcher --max-fps 150
 ```
 This adds a non-Steam game, "ROTK Launcher", to your Steam library, with
-SVT-Proton ([see below](#svt-proton)) as its compatibility tool, ROTK
+SVT-GE-Proton ([see below](#svt-ge-proton)) as its compatibility tool, ROTK
 Launcher's own icon (copied out of the installed launcher once it's there),
 and the options you gave baked into its launch options
 (`... rotk-launcher --max-fps 150 -- %command%`). Then it has Steam start it
@@ -76,11 +76,11 @@ On Windows, run `steam-utility-launcher rotk-launcher` directly.
 
 To set the shortcut up by hand instead: add a non-Steam game (its target is
 never run, but it can't be empty or Steam shows no icon: use `/usr/bin/true`),
-force **SVT-Proton-GE11** under Properties > Compatibility, and set its launch
+force **SVT-GE-Proton-11** under Properties > Compatibility, and set its launch
 options to `steam-utility-launcher rotk-launcher -- %command%` (options of this
 program go before the `--`).
 
-> **Linux note:** the shortcut has to use [SVT-Proton](#svt-proton).
+> **Linux note:** the shortcut has to use [SVT-GE-Proton](#svt-ge-proton).
 > `rotk-launcher` refuses to start otherwise, because on other Protons the
 > game can hang while starting. To run with whatever Proton the shortcut uses
 > anyway, add `--allow-any-proton`.
@@ -264,27 +264,36 @@ Two environment variables exist for testing: `SUL_POWERSHELL_LOG` (log file,
 set by `rotk-launcher`; default `%TEMP%\sul-powershell-commands.log`) and
 `SUL_POWERSHELL_NO_POPUP` (suppress the message box).
 
-#### SVT-Proton
+#### SVT-GE-Proton
 
-SVT-Proton is [GE-Proton](https://github.com/GloriousEggroll/proton-ge-custom)
+SVT-GE-Proton is [GE-Proton](https://github.com/GloriousEggroll/proton-ge-custom)
 with a few fixes
-([sevaht/SVT-proton-ge-custom](https://github.com/sevaht/SVT-proton-ge-custom),
-`SVT-Proton-GE11` is GE-Proton 11). The ones ROTK Launcher and Z1 Battle Royale
+([sevaht/SVT-proton-ge-custom](https://github.com/sevaht/SVT-proton-ge-custom);
+`SVT-GE-Proton-11` is GE-Proton 11). The ones ROTK Launcher and Z1 Battle Royale
 depend on:
 
 - the game no longer hangs at start-up: ROTK's patch library can suspend the
   game's main thread while Wine is doing its one-time window setup, and
-  SVT-Proton does that setup first (`rotk-launcher` asks for it with
+  SVT-GE-Proton does that setup first (`rotk-launcher` asks for it with
   `PROTON_EAGER_DESKTOP`);
 - dragging a window by its own title bar no longer leaves the window manager
   stuck in a move.
 
-Download a release from that repository's releases page and unpack it into
-`~/.local/share/Steam/compatibilitytools.d/`, then restart Steam so it lists
-**SVT-Proton-GE11**. (`steam-utility-launcher svt-proton` still installs the
-older, Valve-based SVT-Proton 11.0; it doesn't fetch this one yet.)
+Install it, or update it to the latest release, with:
 
-Unless the shortcut uses SVT-Proton, `rotk-launcher` says why and exits
+```bash
+steam-utility-launcher proton svt-ge
+```
+
+then restart Steam so it lists **SVT-GE-Proton-11**. The download is checked
+against the release's `.sha512sum`, and an update replaces the installed tool
+(`--force` installs even when it is current). The same command installs
+upstream GE-Proton (`proton ge`; `--tag GE-Proton10-4` picks a release, and
+each one is a tool of its own), and `proton` on its own lists them. Doing it by
+hand works too: unpack a release's `.tar.gz` into
+`~/.local/share/Steam/compatibilitytools.d/`.
+
+Unless the shortcut uses SVT-GE-Proton, `rotk-launcher` says why and exits
 without starting or installing anything. `--allow-any-proton` skips that
 requirement (the game may hang while starting).
 
@@ -456,8 +465,8 @@ library.
 
 ## Installed tool locations
 
-(SVT-Proton is the exception: it goes where Steam looks for tools, see
-[SVT-Proton](#svt-proton).) Tools are downloaded to:
+(SVT-GE-Proton is the exception: it goes where Steam looks for tools, see
+[SVT-GE-Proton](#svt-ge-proton).) Tools are downloaded to:
 
 ```
 ~/.local/share/steam-utility-launcher/<ToolName>/

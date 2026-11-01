@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 import vdf  # type: ignore[import-untyped]
 
-from . import svt_proton
+from . import svt_ge_proton
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -392,18 +392,20 @@ def _close_steam_for_change(
 
 
 def _svt_tool_name(steam: Steam) -> str:
+    # By number, so that SVT-GE-Proton-11 is newer than SVT-GE-Proton-9.
     names = sorted(
         (
             tool.internal_name
             for tool in steam.compatibility_tools
-            if svt_proton.is_svt_proton(tool)
+            if svt_ge_proton.is_svt_ge_proton(tool)
         ),
+        key=lambda name: [int(part) for part in re.findall(r"[0-9]+", name)],
         reverse=True,
     )
     if not names:
         msg = (
-            "SVT-Proton isn't installed, and the shortcut needs it: install"
-            " it into Steam's compatibilitytools.d, restart Steam, then run"
+            "SVT-GE-Proton isn't installed, and the shortcut needs it: run"
+            " `steam-utility-launcher proton svt-ge`, restart Steam, then run"
             " this again."
         )
         raise ShortcutError(msg)
@@ -423,7 +425,7 @@ def ensure_shortcut(  # noqa: PLR0913
     ask: Callable[[str], str] = input,
 ) -> int | None:
     """Makes sure Steam's library has a non-Steam game `name` that runs
-    `program mode options -- %command%` with an SVT-Proton compatibility tool,
+    `program mode options -- %command%` with an SVT-GE-Proton compatibility tool,
     and, with `launch`, has Steam start it. Returns its app id, or None, having
     said why, if that isn't so. `icon` is the image file the entry shows; the
     file needn't exist yet.

@@ -13,7 +13,7 @@ from steam_utility_launcher import (
     hwid_access,
     powershell_log,
     steam_shortcuts,
-    svt_proton,
+    svt_ge_proton,
     tpm_setup,
     update_check,
     vc_runtime,
@@ -42,7 +42,7 @@ SHORTCUT_NAME = "ROTK Launcher"
 # is copied out of the installed launcher (nothing of it is shipped here) to a
 # fixed place, so the shortcut can name it before the launcher is installed.
 _ICON_IN_ASAR = "dist/branding/rotk-mark.png"
-# Waives the requirement that the Proton ROTK Launcher runs with be SVT-Proton.
+# Waives the requirement that the Proton ROTK Launcher runs with be SVT-GE-Proton.
 ALLOW_ANY_PROTON_FLAG = "--allow-any-proton"
 # What Steam's command for the shortcut has before the program to run
 # (<proton> <verb> <program> <arguments>): Proton's script and its verb.
@@ -75,7 +75,7 @@ _OVERLAY_LIBRARY = "gameoverlayrenderer"
 
 # ROTK's patch library (rotkc.dll, loaded into the game by the ROTK launcher's
 # game files) sometimes suspends the game's main thread while Wine is in the
-# one-time window setup, and the game then hangs for good. SVT-Proton (a
+# one-time window setup, and the game then hangs for good. SVT-GE-Proton (a
 # Proton build with a small Wine change) does that setup at process start for
 # the program(s) named here; other Proton builds ignore the setting.
 _GAME_EXECUTABLE = "H1Z1.exe"
@@ -634,9 +634,9 @@ def _checks_pass(
 ) -> bool:
     """Whether the launch may go on, before anything is downloaded, installed
     or started. Says why not if it may not."""
-    # The tool has to be SVT-Proton, which has the Wine fixes the game needs
+    # The tool has to be SVT-GE-Proton, which has the Wine fixes the game needs
     # to start reliably, unless that is waived.
-    if not svt_proton.ensure_session_uses(
+    if not svt_ge_proton.ensure_session_uses(
         _require_steam(steam),
         session,
         override_flag=ALLOW_ANY_PROTON_FLAG,

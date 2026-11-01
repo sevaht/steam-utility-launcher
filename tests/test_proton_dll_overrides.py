@@ -95,7 +95,7 @@ def test_prefixed_and_community_proton_builds_are_recognised(
     for name in (
         "proton_11.0",
         "Proton-ROTK",
-        "SVT-Proton-11.0",  # the name doesn't start with "proton"
+        "SVT-GE-Proton-11",  # the name doesn't start with "proton"
         "GE-Proton10-4",
     ):
         assert _named(tmp_path, name, "proton").is_proton(), name

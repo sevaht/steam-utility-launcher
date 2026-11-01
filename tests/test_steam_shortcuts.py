@@ -151,10 +151,30 @@ def test_a_config_without_a_mapping_section_is_refused() -> None:
         steam_shortcuts.with_compat_tool('"A"\n{\n}\n', 1, "t")
 
 
+def test_adding_a_shortcut_chooses_the_tool_for_it_alone(
+    tmp_path: Path,
+) -> None:
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
+    default = (
+        '\t\t\t\t\t"0"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"proton_experimental"\n'
+        '\t\t\t\t\t\t"config"\t\t""\n\t\t\t\t\t\t"priority"\t\t"75"\n'
+        "\t\t\t\t\t}\n"
+    )
+    config_path = tmp_path / "config" / "config.vdf"
+    mapping = '\t\t\t\t"CompatToolMapping"\n\t\t\t\t{\n'
+    config_path.write_text(CONFIG.replace(mapping, mapping + default))
+    assert _ensure(steam)
+    app_id = steam_shortcuts.shortcut_app_id("/usr/bin/true", "ROTK Launcher")
+    config = config_path.read_text()
+    assert steam_shortcuts.compat_tool_of(config, 0) == "proton_experimental"
+    assert steam_shortcuts.compat_tool_of(config, 367520) == "proton_hotfix"
+    assert steam_shortcuts.compat_tool_of(config, app_id) == "SVT-GE-Proton-11"
+
+
 def test_a_new_shortcut_is_added_with_the_tool_and_a_backup(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    steam = _steam(tmp_path, "SVT-Proton-11.0", "SVT-Proton-GE11")
+    steam = _steam(tmp_path, "SVT-GE-Proton-9", "SVT-GE-Proton-11")
     other = steam_shortcuts.new_entry(
         name="Other", launch_options="x", icon=None
     )
@@ -170,8 +190,8 @@ def test_a_new_shortcut_is_added_with_the_tool_and_a_backup(
     assert added["LaunchOptions"] == "sul rotk-launcher -- %command%"
     app_id = added["appid"] & 0xFFFFFFFF
     config = (tmp_path / "config" / "config.vdf").read_text()
-    # The newest SVT-Proton is chosen, not the old Valve-based one.
-    assert steam_shortcuts.compat_tool_of(config, app_id) == "SVT-Proton-GE11"
+    # The newest SVT-GE-Proton is chosen (by number: 11 is newer than 9).
+    assert steam_shortcuts.compat_tool_of(config, app_id) == "SVT-GE-Proton-11"
     assert (
         len(list((tmp_path / "config").glob("config.vdf.sul-backup-*"))) == 1
     )
@@ -186,7 +206,7 @@ def test_an_existing_shortcut_is_left_alone_and_steam_is_not_closed(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    steam = _steam(tmp_path, "SVT-Proton-GE11")
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
     existing = steam_shortcuts.new_entry(
         name="ROTK Launcher", launch_options="mine --max-fps 150", icon=None
     )
@@ -208,7 +228,7 @@ def test_an_existing_shortcut_is_left_alone_and_steam_is_not_closed(
 def test_a_renamed_entry_is_found_by_its_launch_options(
     tmp_path: Path,
 ) -> None:
-    steam = _steam(tmp_path, "SVT-Proton-GE11")
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
     _write_shortcuts(
         tmp_path,
         steam_shortcuts.new_entry(
@@ -223,7 +243,7 @@ def test_a_renamed_entry_is_found_by_its_launch_options(
 def test_steam_is_closed_after_asking_and_only_then_changed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    steam = _steam(tmp_path, "SVT-Proton-GE11")
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
     running = [True]
     monkeypatch.setattr(
         steam_shortcuts, "steam_is_running", lambda: running[0]
@@ -253,7 +273,7 @@ def test_declining_to_close_steam_changes_nothing(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    steam = _steam(tmp_path, "SVT-Proton-GE11")
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
     monkeypatch.setattr(steam_shortcuts, "steam_is_running", lambda: True)
     with caplog.at_level("ERROR"):
         assert not _ensure(steam, ask=lambda _prompt: "n")
@@ -264,7 +284,7 @@ def test_declining_to_close_steam_changes_nothing(
 def test_no_answer_available_counts_as_no(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    steam = _steam(tmp_path, "SVT-Proton-GE11")
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
     monkeypatch.setattr(steam_shortcuts, "steam_is_running", lambda: True)
 
     def no_input(_prompt: str) -> str:
@@ -277,7 +297,7 @@ def test_no_answer_available_counts_as_no(
 def test_yes_closes_steam_without_asking(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    steam = _steam(tmp_path, "SVT-Proton-GE11")
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
     running = [True]
     monkeypatch.setattr(
         steam_shortcuts, "steam_is_running", lambda: running[0]
@@ -295,20 +315,20 @@ def test_yes_closes_steam_without_asking(
     assert _shortcuts_path(tmp_path).exists()
 
 
-def test_without_svt_proton_nothing_is_changed(
+def test_without_svt_ge_proton_nothing_is_changed(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     steam = _steam(tmp_path, "proton_experimental")
     with caplog.at_level("ERROR"):
         assert not _ensure(steam)
-    assert "SVT-Proton isn't installed" in caplog.text
+    assert "SVT-GE-Proton isn't installed" in caplog.text
     assert not _shortcuts_path(tmp_path).exists()
 
 
 def test_the_shortcut_names_the_icon_even_before_it_exists(
     tmp_path: Path,
 ) -> None:
-    steam = _steam(tmp_path, "SVT-Proton-GE11")
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
     icon = tmp_path / "data" / "icon.png"
     assert _ensure(steam, icon=icon)
     data = vdf.binary_loads(_shortcuts_path(tmp_path).read_bytes())
@@ -316,7 +336,7 @@ def test_the_shortcut_names_the_icon_even_before_it_exists(
 
 
 def test_a_shortcut_without_an_icon_gets_none(tmp_path: Path) -> None:
-    steam = _steam(tmp_path, "SVT-Proton-GE11")
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
     assert _ensure(steam)
     data = vdf.binary_loads(_shortcuts_path(tmp_path).read_bytes())
     assert data["shortcuts"]["0"]["icon"] == ""
@@ -399,7 +419,7 @@ def test_launch_options_in_another_form_are_written_afresh() -> None:
 
 
 def _existing(root: Path, launch_options: str) -> Steam:
-    steam = _steam(root, "SVT-Proton-GE11")
+    steam = _steam(root, "SVT-GE-Proton-11")
     _write_shortcuts(
         root,
         steam_shortcuts.new_entry(
@@ -490,7 +510,7 @@ def test_an_update_that_steam_being_open_prevents_says_so(
 def test_the_shortcut_is_started_through_steam_after_it_is_added(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    steam = _steam(tmp_path, "SVT-Proton-GE11")
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
     app_id = _ensure(steam, launch=True)
     data = vdf.binary_loads(_shortcuts_path(tmp_path).read_bytes())
     assert app_id == data["shortcuts"]["0"]["appid"] & 0xFFFFFFFF
@@ -520,7 +540,7 @@ def test_an_updated_shortcut_is_started_through_steam(tmp_path: Path) -> None:
 def test_nothing_is_started_if_the_shortcut_could_not_be_set_up(
     tmp_path: Path,
 ) -> None:
-    steam = _steam(tmp_path, "proton_experimental")  # no SVT-Proton
+    steam = _steam(tmp_path, "proton_experimental")  # no SVT-GE-Proton
     assert _ensure(steam, launch=True) is None
     assert LAUNCHED == []
 
@@ -542,7 +562,7 @@ def test_the_game_id_steam_is_given_is_the_app_id_shifted(
 
 
 def test_a_new_shortcut_has_a_target_that_does_nothing(tmp_path: Path) -> None:
-    steam = _steam(tmp_path, "SVT-Proton-GE11")
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
     assert _ensure(steam)
     data = vdf.binary_loads(_shortcuts_path(tmp_path).read_bytes())
     entry = data["shortcuts"]["0"]

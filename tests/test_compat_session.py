@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 GAME_ID = "433850"
 
 
-def _tool(root: Path, name: str = "SVT-Proton-GE11") -> CompatibilityTool:
+def _tool(root: Path, name: str = "SVT-GE-Proton-11") -> CompatibilityTool:
     install_path = root / "compatibilitytools.d" / name
     (install_path / "files" / "bin").mkdir(parents=True)
     wine = install_path / "files" / "bin" / "wine"
@@ -73,7 +73,7 @@ def test_without_what_steam_sets_there_is_no_session(
 
 
 def test_the_tool_of_a_session_is_found_by_its_folder(tmp_path: Path) -> None:
-    mine = _tool(tmp_path, "SVT-Proton-GE11")
+    mine = _tool(tmp_path, "SVT-GE-Proton-11")
     other = _tool(tmp_path, "GE-Proton10-1")
     steam = _steam(tmp_path, other, mine)
     session = CompatSession(tmp_path / "data", mine.install_path)

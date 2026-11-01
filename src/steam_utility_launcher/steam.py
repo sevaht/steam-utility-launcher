@@ -232,7 +232,7 @@ class CompatibilityTool:
     binary_argument_template: list[str]
 
     def is_proton(self) -> bool:
-        # By name anywhere in it (Proton-ROTK, GE-Proton10-4, SVT-Proton-11.0,
+        # By name anywhere in it (Proton-ROTK, GE-Proton10-4, SVT-GE-Proton-11,
         # not only names that start with it), or by being run through a
         # `proton` script, which is what every Proton build ships.
         return (
