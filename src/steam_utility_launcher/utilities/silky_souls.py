@@ -25,11 +25,8 @@ def launch(*, steam: Steam | None = None) -> int:
     install_directory = updater.default_install_directory
     tool_path = [str(install_directory / "SilkySouls.exe")]
     if sys.platform.startswith("linux"):
-        if not steam:
-            msg = "steam context must be provided on linux!"
-            raise AssertionError(msg)
         processes = [
-            steam.process_in_prefix(
+            Steam.require(steam).process_in_prefix(
                 tool_path, game_id="570940", cwd=install_directory
             )
         ]

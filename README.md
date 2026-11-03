@@ -53,9 +53,12 @@ any game. Run the command on its own and it sets the shortcut up and starts it:
 ```bash
 steam-utility-launcher rotk-launcher --max-fps 150
 ```
-This adds a non-Steam game, "ROTK Launcher", to your Steam library, with
+This adds a non-Steam game, "Z1 Battle Royale (ROTK)", to your Steam library, with
 SVT-GE-Proton ([see below](#svt-ge-proton)) as its compatibility tool, ROTK
 Launcher's own icon (copied out of the installed launcher once it's there),
+Z1 Battle Royale's banner, capsules and logo (copied from Steam's library
+cache, if it has them; images you set yourself are kept, and Steam needs a
+restart to show them),
 and the options you gave baked into its launch options
 (`... rotk-launcher --max-fps 150 -- %command%`). Then it has Steam start it
 (`--no-launch` leaves that to you), so the first run is also the first launch:
@@ -112,6 +115,11 @@ file is written. A `DXVK_CONFIG` already in your environment is kept (the
 overlay is added after it). A `DXVK_HUD` in your environment takes precedence
 over all of this and shows the overlay in every window; avoid setting it.
 
+**Which Steam app the game is.** The shortcut is its own Steam app, and the
+game's processes keep the ids Steam gave them (`SteamAppId`, `SteamGameId`), so
+Steam applies the shortcut's own settings (its overlay switch, compatibility
+tool, playtime), not those of Z1 Battle Royale.
+
 **Frame rate limit.** `--max-fps FPS` caps the game's frame rate with DXVK's
 `dxgi.maxFrameRate`, for example to match your monitor's refresh rate instead
 of using vsync (a menu that isn't limited renders as fast as the GPU allows,
@@ -145,7 +153,22 @@ then wasted, which is what `--max-fps` is for.
 
 If ROTK Launcher isn't installed yet, this downloads the latest release,
 verifies its checksum against the release's `SHA256SUMS.txt`, and runs the
-installer silently inside the game's Proton prefix before launching the app.
+installer silently inside the shortcut's own Proton prefix (the one Steam
+makes for the "Z1 Battle Royale (ROTK)" shortcut, `compatdata/<shortcut id>/pfx`, never
+Z1 Battle Royale's) before launching the app. Everything this tool puts in a
+prefix (the installer, the Visual C++ runtime, the PowerShell stand-in, the
+list of Steam libraries) goes into that prefix alone, whatever id the shortcut
+has: it gets a new one, and a new prefix, if it is added again, and the next
+launch sets that one up the same way.
+
+The game's files are copied by ROTK Launcher from the Steam library Z1 Battle
+Royale is installed in, so that library is listed for it: this tool writes a
+`libraryfolders.vdf` in the prefix's `Program Files/Steam/steamapps` that names
+the library (as a `Z:` path) and has the container show it, so the launcher
+finds the game by itself. Z1 only has to be installed for that first copy; once
+`C:\Games\ROTK` has the files, the prefix doesn't depend on Z1 or on Z1's own
+prefix. Nothing else is shared with Z1 (the processes are the shortcut's own
+Steam app).
 
 If it's already installed, **this does not update it** — ROTK Launcher has
 its own in-app auto-updater, so this tool defers to that rather than
@@ -170,11 +193,11 @@ before installing, treating exit `0` as "yes, it's running" — since the
 stub always exits `0`, it would otherwise conclude the app is permanently
 running and get stuck forever on a "cannot be closed" dialog. To avoid
 that, `rotk-launcher` disables `powershell.exe` (via `WINEDLLOVERRIDES`) for
-just the installer and app processes it starts, making it fail to launch
+just the installer's process, making it fail to launch
 instead of falsely succeeding. The installer's own template already handles
 PowerShell being unavailable, falling back to `tasklist`/`findstr`/
 `taskkill` to answer the same check. Nothing is written to the prefix, and
-the override applies only to those processes; the shared Proton installation
+the override applies only to that process; the shared Proton installation
 and every other prefix and process are untouched.
 
 **Hardware ID (`hwid_required`).** ROTK's account service now refuses launches

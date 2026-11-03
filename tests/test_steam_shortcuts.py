@@ -3,7 +3,7 @@ from __future__ import annotations
 import collections
 import shutil
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import vdf  # type: ignore[import-untyped]
@@ -12,10 +12,12 @@ from steam_utility_launcher import steam_shortcuts
 from steam_utility_launcher.steam import (
     CompatibilityTool,
     Steam,
+    SteamError,
     SteamLocation,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 STEAM_ID64 = 76561197969290206
@@ -75,16 +77,24 @@ def _write_shortcuts(root: Path, *entries: dict[str, object]) -> None:
 
 
 LAUNCHED: list[int] = []
-_REAL_LAUNCH = steam_shortcuts.launch_through_steam
+_REAL_LAUNCH = SteamLocation.launch_game
+
+
+def _client_running(
+    monkeypatch: pytest.MonkeyPatch, running: Callable[[], bool]
+) -> None:
+    monkeypatch.setattr(
+        SteamLocation, "is_client_running", staticmethod(running)
+    )
 
 
 @pytest.fixture(autouse=True)
 def _steam_not_running(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(steam_shortcuts, "steam_is_running", lambda: False)
+    _client_running(monkeypatch, lambda: False)
     LAUNCHED.clear()
     monkeypatch.setattr(
-        steam_shortcuts,
-        "launch_through_steam",
+        SteamLocation,
+        "launch_game",
         lambda _location, app_id: LAUNCHED.append(app_id),
     )
 
@@ -117,7 +127,7 @@ def test_app_ids_are_stored_signed_and_read_back_unsigned() -> None:
 
 def test_the_account_is_the_one_that_signed_in_last(tmp_path: Path) -> None:
     steam = _steam(tmp_path)
-    account = steam_shortcuts.account_directory(steam.location)
+    account = steam.location.account_directory()
     assert account == tmp_path / "userdata" / str(ACCOUNT)
 
 
@@ -127,8 +137,8 @@ def test_several_accounts_none_the_latest_is_refused(tmp_path: Path) -> None:
         '"users"\n{\n\t"76561197969290206"\n\t{\n\t}\n'
         '\t"76561197969290207"\n\t{\n\t}\n}\n'
     )
-    with pytest.raises(steam_shortcuts.ShortcutError, match="which Steam"):
-        steam_shortcuts.account_directory(steam.location)
+    with pytest.raises(SteamError, match="which Steam"):
+        steam.location.account_directory()
 
 
 def test_a_compat_tool_is_added_without_touching_the_rest() -> None:
@@ -213,31 +223,34 @@ def test_an_existing_shortcut_is_left_alone_and_steam_is_not_closed(
     _write_shortcuts(tmp_path, existing)
     before = _shortcuts_path(tmp_path).read_bytes()
     config_before = (tmp_path / "config" / "config.vdf").read_text()
-    monkeypatch.setattr(steam_shortcuts, "steam_is_running", lambda: True)
+    _client_running(monkeypatch, lambda: True)
 
     def fail(*_a: object, **_k: object) -> None:
         pytest.fail("Steam must not be closed for an entry that is there")
 
-    monkeypatch.setattr(steam_shortcuts, "shut_down_steam", fail)
+    monkeypatch.setattr(SteamLocation, "shut_down_client", fail)
     assert _ensure(steam, ask=fail)
     assert _shortcuts_path(tmp_path).read_bytes() == before
     assert (tmp_path / "config" / "config.vdf").read_text() == config_before
     assert "already in your Steam library" in capsys.readouterr().out
 
 
-def test_a_renamed_entry_is_found_by_its_launch_options(
-    tmp_path: Path,
+def test_an_entry_with_another_name_is_found_by_its_launch_options_and_renamed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     steam = _steam(tmp_path, "SVT-GE-Proton-11")
-    _write_shortcuts(
-        tmp_path,
-        steam_shortcuts.new_entry(
-            name="Z1 mod", launch_options="/x/sul rotk-launcher -- ", icon=None
-        ),
+    entry = steam_shortcuts.new_entry(
+        name="Z1 mod", launch_options="/x/sul rotk-launcher -- ", icon=None
     )
-    before = _shortcuts_path(tmp_path).read_bytes()
+    _write_shortcuts(tmp_path, entry)
+    _client_running(monkeypatch, lambda: False)
+    app_id = entry["appid"]
     assert _ensure(steam)
-    assert _shortcuts_path(tmp_path).read_bytes() == before
+    saved = steam_shortcuts.load_shortcuts(_shortcuts_path(tmp_path))
+    entries = list(cast("dict[str, Any]", saved["shortcuts"]).values())
+    assert len(entries) == 1
+    assert entries[0]["AppName"] == "ROTK Launcher"
+    assert entries[0]["appid"] == app_id  # so it keeps its prefix
 
 
 def test_steam_is_closed_after_asking_and_only_then_changed(
@@ -245,16 +258,14 @@ def test_steam_is_closed_after_asking_and_only_then_changed(
 ) -> None:
     steam = _steam(tmp_path, "SVT-GE-Proton-11")
     running = [True]
-    monkeypatch.setattr(
-        steam_shortcuts, "steam_is_running", lambda: running[0]
-    )
+    _client_running(monkeypatch, lambda: running[0])
     closed: list[bool] = []
 
     def shut_down(_location: object) -> None:
         closed.append(True)
         running[0] = False
 
-    monkeypatch.setattr(steam_shortcuts, "shut_down_steam", shut_down)
+    monkeypatch.setattr(SteamLocation, "shut_down_client", shut_down)
     prompts: list[str] = []
 
     def ask(prompt: str) -> str:
@@ -274,7 +285,7 @@ def test_declining_to_close_steam_changes_nothing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     steam = _steam(tmp_path, "SVT-GE-Proton-11")
-    monkeypatch.setattr(steam_shortcuts, "steam_is_running", lambda: True)
+    _client_running(monkeypatch, lambda: True)
     with caplog.at_level("ERROR"):
         assert not _ensure(steam, ask=lambda _prompt: "n")
     assert "Close Steam" in caplog.text
@@ -285,7 +296,7 @@ def test_no_answer_available_counts_as_no(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     steam = _steam(tmp_path, "SVT-GE-Proton-11")
-    monkeypatch.setattr(steam_shortcuts, "steam_is_running", lambda: True)
+    _client_running(monkeypatch, lambda: True)
 
     def no_input(_prompt: str) -> str:
         raise EOFError
@@ -299,12 +310,10 @@ def test_yes_closes_steam_without_asking(
 ) -> None:
     steam = _steam(tmp_path, "SVT-GE-Proton-11")
     running = [True]
+    _client_running(monkeypatch, lambda: running[0])
     monkeypatch.setattr(
-        steam_shortcuts, "steam_is_running", lambda: running[0]
-    )
-    monkeypatch.setattr(
-        steam_shortcuts,
-        "shut_down_steam",
+        SteamLocation,
+        "shut_down_client",
         lambda _location: running.__setitem__(0, False),
     )
 
@@ -472,12 +481,10 @@ def test_an_update_closes_steam_after_asking(
 ) -> None:
     steam = _existing(tmp_path, "sul rotk-launcher -- %command%")
     running = [True]
+    _client_running(monkeypatch, lambda: running[0])
     monkeypatch.setattr(
-        steam_shortcuts, "steam_is_running", lambda: running[0]
-    )
-    monkeypatch.setattr(
-        steam_shortcuts,
-        "shut_down_steam",
+        SteamLocation,
+        "shut_down_client",
         lambda _location: running.__setitem__(0, False),
     )
     prompts: list[str] = []
@@ -500,7 +507,7 @@ def test_an_update_that_steam_being_open_prevents_says_so(
 ) -> None:
     steam = _existing(tmp_path, "sul rotk-launcher -- %command%")
     before = _shortcuts_path(tmp_path).read_bytes()
-    monkeypatch.setattr(steam_shortcuts, "steam_is_running", lambda: True)
+    _client_running(monkeypatch, lambda: True)
     with caplog.at_level("ERROR"):
         assert not _ensure(steam, options=["--tpm"], ask=lambda _p: "n")
     assert "update the launch options" in caplog.text
@@ -591,3 +598,60 @@ def test_a_shortcut_without_a_target_is_given_one(
     assert entry["appid"] == app_id  # the id never changes
     assert entry["LaunchOptions"] == "sul rotk-launcher --tpm -- %command%"
     assert "Updated the target" in capsys.readouterr().out
+
+
+def _librarycache(root: Path, *names: str) -> Path:
+    source = root / "appcache" / "librarycache" / "433850"
+    source.mkdir(parents=True)
+    for name in names:
+        (source / name).write_bytes(name.encode())
+    return source
+
+
+def test_the_banner_and_capsules_of_a_game_become_the_shortcuts_images(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
+    source = _librarycache(
+        tmp_path,
+        "library_hero.jpg",
+        "library_600x900.jpg",
+        "header.jpg",
+        "logo.png",
+        "library_hero_blur.jpg",
+    )
+    _client_running(monkeypatch, lambda: False)
+    app_id = _ensure(steam, artwork=source)
+    assert app_id is not None
+    grid = tmp_path / "userdata" / str(ACCOUNT) / "config" / "grid"
+    assert sorted(path.name for path in grid.iterdir()) == sorted(
+        f"{app_id}{suffix}"
+        for suffix in ("_hero.jpg", "p.jpg", ".jpg", "_logo.png")
+    )
+    assert (grid / f"{app_id}_hero.jpg").read_bytes() == b"library_hero.jpg"
+
+
+def test_images_the_shortcut_already_has_are_not_replaced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
+    source = _librarycache(tmp_path, "library_hero.jpg", "logo.png")
+    _client_running(monkeypatch, lambda: False)
+    app_id = _ensure(steam, artwork=source)
+    grid = tmp_path / "userdata" / str(ACCOUNT) / "config" / "grid"
+    (grid / f"{app_id}_hero.jpg").write_bytes(b"mine")
+    (grid / f"{app_id}_logo.png").unlink()
+    assert _ensure(steam, artwork=source) == app_id
+    assert (grid / f"{app_id}_hero.jpg").read_bytes() == b"mine"
+    assert (grid / f"{app_id}_logo.png").read_bytes() == b"logo.png"
+
+
+def test_a_game_steam_has_no_images_for_gives_the_shortcut_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    steam = _steam(tmp_path, "SVT-GE-Proton-11")
+    _client_running(monkeypatch, lambda: False)
+    assert _ensure(steam, artwork=tmp_path / "appcache" / "nothing")
+    assert not (
+        tmp_path / "userdata" / str(ACCOUNT) / "config" / "grid"
+    ).exists()

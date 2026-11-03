@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import struct
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from steam_utility_launcher import vc_runtime
+from steam_utility_launcher.wine_prefix import WinePrefix
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from steam_utility_launcher.steam import Process
 
 _SIGNATURE = b"\xbd\x04\xef\xfe"
 
@@ -93,12 +96,15 @@ def test_minimum_version_boundary(
 ) -> None:
     _write_dll(tmp_path, "system32", version)
     _write_dll(tmp_path, "syswow64", version)
-    assert bool(vc_runtime.outdated_redistributables(tmp_path)) is outdated
+    assert (
+        bool(vc_runtime.outdated_redistributables(WinePrefix(tmp_path)))
+        is outdated
+    )
 
 
 def test_missing_runtime_counts_as_outdated(tmp_path: Path) -> None:
     _write_dll(tmp_path, "system32", (14, 44))
-    stale = vc_runtime.outdated_redistributables(tmp_path)
+    stale = vc_runtime.outdated_redistributables(WinePrefix(tmp_path))
     assert [r.architecture for r in stale] == ["x86"]
 
 
@@ -114,9 +120,9 @@ def test_wine_builtins_that_claim_a_current_version_are_not_current(
         0,
         0,
     )
-    stale = vc_runtime.outdated_redistributables(tmp_path)
+    stale = vc_runtime.outdated_redistributables(WinePrefix(tmp_path))
     assert [r.architecture for r in stale] == ["x64", "x86"]
-    problems = vc_runtime._problems(tmp_path, stale[0])
+    problems = vc_runtime._problems(WinePrefix(tmp_path), stale[0])
     assert r"system32\msvcp140.dll: Wine builtin" in problems
     assert len(problems) == len(stale[0].dlls)
 
@@ -126,13 +132,13 @@ def test_one_builtin_among_real_files_is_enough_to_be_stale(
 ) -> None:
     _write_dll(tmp_path, "system32", (14, 44))
     _write_dll(tmp_path, "syswow64", (14, 44))
-    assert not vc_runtime.outdated_redistributables(tmp_path)
+    assert not vc_runtime.outdated_redistributables(WinePrefix(tmp_path))
     _dll(tmp_path, "system32", "vcruntime140").write_bytes(
         _builtin_bytes(14, 44)
     )
-    stale = vc_runtime.outdated_redistributables(tmp_path)
+    stale = vc_runtime.outdated_redistributables(WinePrefix(tmp_path))
     assert [r.architecture for r in stale] == ["x64"]
-    assert vc_runtime._problems(tmp_path, stale[0]) == [
+    assert vc_runtime._problems(WinePrefix(tmp_path), stale[0]) == [
         r"system32\vcruntime140.dll: Wine builtin"
     ]
 
@@ -141,8 +147,8 @@ def test_a_missing_dll_of_the_set_is_stale(tmp_path: Path) -> None:
     _write_dll(tmp_path, "system32", (14, 44))
     _write_dll(tmp_path, "syswow64", (14, 44))
     _dll(tmp_path, "syswow64", "vcomp140").unlink()
-    [stale] = vc_runtime.outdated_redistributables(tmp_path)
-    assert vc_runtime._problems(tmp_path, stale) == [
+    [stale] = vc_runtime.outdated_redistributables(WinePrefix(tmp_path))
+    assert vc_runtime._problems(WinePrefix(tmp_path), stale) == [
         r"syswow64\vcomp140.dll: missing"
     ]
 
@@ -152,29 +158,7 @@ def test_only_the_x64_runtime_has_vcruntime140_1(tmp_path: Path) -> None:
     _write_dll(tmp_path, "syswow64", (14, 44))
     assert _dll(tmp_path, "system32", "vcruntime140_1").exists()
     assert not _dll(tmp_path, "syswow64", "vcruntime140_1").exists()
-    assert not vc_runtime.outdated_redistributables(tmp_path)
-
-
-def test_a_link_to_a_builtin_is_a_builtin_and_a_link_to_a_real_file_is_not(
-    tmp_path: Path,
-) -> None:
-    builtin = tmp_path / "builtin.dll"
-    builtin.write_bytes(_builtin_bytes(14, 44))
-    real = tmp_path / "real.dll"
-    real.write_bytes(_dll_bytes(14, 44))
-    to_builtin = tmp_path / "to_builtin.dll"
-    to_builtin.symlink_to(builtin)
-    to_real = tmp_path / "to_real.dll"
-    to_real.symlink_to(real)
-    assert vc_runtime.is_wine_builtin(to_builtin)
-    assert not vc_runtime.is_wine_builtin(to_real)
-    assert not vc_runtime.is_wine_builtin(tmp_path / "missing.dll")
-
-
-def test_wine_placeholder_files_count_as_builtins(tmp_path: Path) -> None:
-    placeholder = tmp_path / "x.dll"
-    placeholder.write_bytes(b"MZ" + bytes(62) + b"Wine placeholder DLL")
-    assert vc_runtime.is_wine_builtin(placeholder)
+    assert not vc_runtime.outdated_redistributables(WinePrefix(tmp_path))
 
 
 def test_pinned_hashes_look_like_sha256() -> None:
@@ -183,18 +167,16 @@ def test_pinned_hashes_look_like_sha256() -> None:
         assert redist.url.startswith("https://")
 
 
-class _FakeSteam:
+class _Runner:
+    """Starts commands in the prefix, recording them."""
+
     def __init__(self, on_run: Callable[[list[str]], int]) -> None:
         self.on_run = on_run
         self.commands: list[list[str]] = []
 
-    def process_in_prefix(
-        self, command_line: list[str], *, game_id: str, session: object = None
-    ) -> _FakeProcess:
-        del session
-        assert game_id == "433850"
+    def __call__(self, command_line: list[str]) -> Process:
         self.commands.append(command_line)
-        return _FakeProcess(lambda: self.on_run(command_line))
+        return cast("Process", _FakeProcess(lambda: self.on_run(command_line)))
 
 
 class _FakeProcess:
@@ -246,9 +228,9 @@ def test_nothing_happens_when_the_runtime_is_current(
         raise AssertionError(url)
 
     monkeypatch.setattr(vc_runtime, "https_get", no_network)
-    steam = _FakeSteam(lambda _: pytest.fail("must not run an installer"))
-    vc_runtime.ensure_current(steam=steam, prefix=prefix, game_id="433850")  # type: ignore[arg-type]
-    assert steam.commands == []
+    runner = _Runner(lambda _: pytest.fail("must not run an installer"))
+    vc_runtime.ensure_current(WinePrefix(prefix), run=runner)
+    assert runner.commands == []
     assert not cache.exists()
 
 
@@ -265,17 +247,17 @@ def test_installs_only_the_stale_architecture_and_caches_it(
         _write_dll(prefix, "syswow64", (14, 44))
         return 0
 
-    steam = _FakeSteam(run)
-    vc_runtime.ensure_current(steam=steam, prefix=prefix, game_id="433850")  # type: ignore[arg-type]
-    assert len(steam.commands) == 1
-    assert steam.commands[0][0].endswith("vc_redist.x86.exe")
+    runner = _Runner(run)
+    vc_runtime.ensure_current(WinePrefix(prefix), run=runner)
+    assert len(runner.commands) == 1
+    assert runner.commands[0][0].endswith("vc_redist.x86.exe")
     assert (cache / "vc_redist.x86.exe").read_bytes() == b"x86-installer"
     assert not (cache / "vc_redist.x64.exe").exists()
 
     # A later run finds it current and needs nothing (and no network).
     monkeypatch.setattr(vc_runtime, "https_get", lambda _: pytest.fail("net"))
-    vc_runtime.ensure_current(steam=steam, prefix=prefix, game_id="433850")  # type: ignore[arg-type]
-    assert len(steam.commands) == 1
+    vc_runtime.ensure_current(WinePrefix(prefix), run=runner)
+    assert len(runner.commands) == 1
 
 
 def test_cached_installer_is_reused_without_downloading(
@@ -308,10 +290,10 @@ def test_download_that_does_not_match_the_pin_is_never_run(
     _write_dll(prefix, "syswow64", (14, 44))
     _pin(monkeypatch, {"x64": b"expected", "x86": b"expected"})
     monkeypatch.setattr(vc_runtime, "https_get", lambda _: (200, b"evil"))
-    steam = _FakeSteam(lambda _: pytest.fail("must not run"))
+    runner = _Runner(lambda _: pytest.fail("must not run"))
     with pytest.raises(RuntimeError, match="pinned checksum"):
-        vc_runtime.ensure_current(steam=steam, prefix=prefix, game_id="433850")  # type: ignore[arg-type]
-    assert steam.commands == []
+        vc_runtime.ensure_current(WinePrefix(prefix), run=runner)
+    assert runner.commands == []
     assert not (cache / "vc_redist.x64.exe").exists()
 
 
@@ -323,9 +305,9 @@ def test_http_error_is_reported(
     _write_dll(prefix, "system32", (14, 0))
     _write_dll(prefix, "syswow64", (14, 44))
     monkeypatch.setattr(vc_runtime, "https_get", lambda _: (503, b""))
-    steam = _FakeSteam(lambda _: pytest.fail("must not run"))
+    runner = _Runner(lambda _: pytest.fail("must not run"))
     with pytest.raises(RuntimeError, match="HTTP status 503"):
-        vc_runtime.ensure_current(steam=steam, prefix=prefix, game_id="433850")  # type: ignore[arg-type]
+        vc_runtime.ensure_current(WinePrefix(prefix), run=runner)
 
 
 @pytest.mark.usefixtures("cache")
@@ -342,10 +324,10 @@ def test_the_installer_replaces_wines_builtins(
         _write_dll(prefix, directory, (14, 44))
         return 0
 
-    steam = _FakeSteam(run)
-    vc_runtime.ensure_current(steam=steam, prefix=prefix, game_id="433850")  # type: ignore[arg-type]
-    assert [c[1] for c in steam.commands] == ["/install", "/install"]
-    assert not vc_runtime.outdated_redistributables(prefix)
+    runner = _Runner(run)
+    vc_runtime.ensure_current(WinePrefix(prefix), run=runner)
+    assert [c[1] for c in runner.commands] == ["/install", "/install"]
+    assert not vc_runtime.outdated_redistributables(WinePrefix(prefix))
 
 
 @pytest.mark.usefixtures("cache")
@@ -362,9 +344,9 @@ def test_repair_pass_fixes_a_registered_but_old_install(
             _write_dll(prefix, "system32", (14, 44))
         return 0
 
-    steam = _FakeSteam(run)
-    vc_runtime.ensure_current(steam=steam, prefix=prefix, game_id="433850")  # type: ignore[arg-type]
-    assert [c[1] for c in steam.commands] == ["/install", "/repair"]
+    runner = _Runner(run)
+    vc_runtime.ensure_current(WinePrefix(prefix), run=runner)
+    assert [c[1] for c in runner.commands] == ["/install", "/repair"]
 
 
 def test_fails_loudly_if_the_installer_did_not_update_it(
@@ -374,9 +356,9 @@ def test_fails_loudly_if_the_installer_did_not_update_it(
     _write_dll(prefix, "system32", (14, 0))
     _write_dll(prefix, "syswow64", (14, 44))
     _pin(monkeypatch, {"x64": b"x64-installer", "x86": b"x86-installer"})
-    steam = _FakeSteam(lambda _: 1)  # installer "runs" but changes nothing
+    runner = _Runner(lambda _: 1)  # installer "runs" but changes nothing
     with pytest.raises(RuntimeError, match=r"still not Microsoft's") as error:
-        vc_runtime.ensure_current(steam=steam, prefix=prefix, game_id="433850")  # type: ignore[arg-type]
+        vc_runtime.ensure_current(WinePrefix(prefix), run=runner)
     assert r"system32\msvcp140.dll: version 14.0.0.0" in str(error.value)
     assert "graphical session" in str(error.value)
 
@@ -389,7 +371,7 @@ def test_it_fails_loudly_if_builtins_are_still_there_afterwards(
     _write_builtin_dll(prefix, "system32")
     _write_dll(prefix, "syswow64", (14, 44))
     _pin(monkeypatch, {"x64": b"x64-installer", "x86": b"x86-installer"})
-    steam = _FakeSteam(lambda _: 2)  # a silent installer without a display
+    runner = _Runner(lambda _: 2)  # a silent installer without a display
     with pytest.raises(RuntimeError, match="Wine builtin") as error:
-        vc_runtime.ensure_current(steam=steam, prefix=prefix, game_id="433850")  # type: ignore[arg-type]
+        vc_runtime.ensure_current(WinePrefix(prefix), run=runner)
     assert r"system32\vcruntime140_1.dll: Wine builtin" in str(error.value)

@@ -11,46 +11,39 @@ from __future__ import annotations
 import collections
 import collections.abc
 import logging
-import os
 import re
 import shlex
 import shutil
-import subprocess
-import time
 import zlib
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import vdf  # type: ignore[import-untyped]
 
 from . import svt_ge_proton
+from .steam import SteamError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from pathlib import Path
 
     from .steam import Steam, SteamLocation
 
 logger = logging.getLogger(__name__)
 
-_STEAM_ID64_BASE = 76561197960265728
 _APP_ID_HIGH_BIT = 0x80000000
 _UNSIGNED_32 = 0xFFFFFFFF
 _SIGNED_32_LIMIT = 0x80000000
 _COMPAT_PRIORITY = "250"  # what Steam itself writes for a chosen tool
-_SHUTDOWN_WAIT_SECONDS = 90
-_SHUTDOWN_POLL_SECONDS = 1.0
 _COMPAT_SECTION = "CompatToolMapping"
 # What a new shortcut runs: a program that does nothing, as the wrapper never
 # uses the target. It can't be empty: Steam shows no icon for a shortcut that
 # has no target.
 _TARGET = "/usr/bin/true"
 _TARGET_DIRECTORY = "/usr/bin/"
-# The low bits of the id Steam uses for a non-Steam game (app id << 32 | this).
-_NON_STEAM_GAME_FLAG = 0x02000000
 
 
-class ShortcutError(RuntimeError):
+class ShortcutError(SteamError):
     """The shortcut couldn't be added; the message says why."""
 
 
@@ -68,37 +61,6 @@ def _signed(app_id: int) -> int:
 
 def _unsigned(stored: int) -> int:
     return stored & _UNSIGNED_32
-
-
-def account_directory(location: SteamLocation) -> Path:
-    """`userdata/<account>` of the Steam account in use: the one that last
-    signed in (or the only one there is)."""
-    try:
-        users = vdf.load(
-            (location.root / "config" / "loginusers.vdf").open(
-                encoding="utf-8"
-            )
-        )["users"]
-    except (OSError, KeyError, SyntaxError) as error:
-        msg = f"Could not read Steam's accounts: {error}"
-        raise ShortcutError(msg) from error
-    recent = [
-        steam_id
-        for steam_id, user in users.items()
-        if any(
-            key.lower() == "mostrecent" and value == "1"
-            for key, value in user.items()
-        )
-    ]
-    candidates = recent or list(users)
-    if len(candidates) != 1:
-        msg = (
-            "Could not tell which Steam account to add the shortcut to; sign"
-            " in to the one you want in Steam, then try again."
-        )
-        raise ShortcutError(msg)
-    account = int(candidates[0]) - _STEAM_ID64_BASE
-    return location.root / "userdata" / str(account)
 
 
 def load_shortcuts(path: Path) -> collections.OrderedDict[str, object]:
@@ -241,60 +203,6 @@ def compat_tool_of(config_text: str, app_id: int) -> str:
         return ""
 
 
-def steam_is_running() -> bool:
-    """Whether this user has a Steam client running."""
-    uid = os.getuid()
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            if (
-                entry / "comm"
-            ).read_text().strip() == "steam" and entry.stat().st_uid == uid:
-                return True
-        except OSError:
-            continue
-    return False
-
-
-def shut_down_steam(location: SteamLocation) -> None:
-    """Asks Steam to exit and waits until it has."""
-    program = shutil.which("steam") or str(location.root / "steam.sh")
-    logger.info("Closing Steam...")
-    try:
-        subprocess.run(  # noqa: S603
-            [program, "-shutdown"], check=False, timeout=30
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        msg = f"Could not tell Steam to close: {error}"
-        raise ShortcutError(msg) from error
-    deadline = time.monotonic() + _SHUTDOWN_WAIT_SECONDS
-    while steam_is_running():
-        if time.monotonic() > deadline:
-            msg = "Steam did not close; close it yourself and try again."
-            raise ShortcutError(msg)
-        time.sleep(_SHUTDOWN_POLL_SECONDS)
-
-
-def launch_through_steam(location: SteamLocation, app_id: int) -> None:
-    """Has Steam start the non-Steam game, starting Steam first if it isn't
-    running (the game then starts once it is up). Steam runs on its own, not
-    as a child of this program."""
-    game_id = (app_id << 32) | _NON_STEAM_GAME_FLAG
-    program = shutil.which("steam") or str(location.root / "steam.sh")
-    try:
-        subprocess.Popen(  # noqa: S603
-            [program, f"steam://rungameid/{game_id}"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except OSError as error:
-        msg = f"Could not start the game through Steam: {error}"
-        raise ShortcutError(msg) from error
-
-
 def _stamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005
 
@@ -383,12 +291,12 @@ def _close_steam_for_change(
     why: str,
 ) -> None:
     """Gets Steam out of the way of a change to its files, if it is running."""
-    if not steam_is_running():
+    if not location.is_client_running():
         return
     if not _ask_to_close_steam(ask, assume_yes=assume_yes, why=why):
         msg = f"Close Steam, then run this again to {why}."
         raise ShortcutError(msg)
-    shut_down_steam(location)
+    location.shut_down_client()
 
 
 def _svt_tool_name(steam: Steam) -> str:
@@ -420,6 +328,7 @@ def ensure_shortcut(  # noqa: PLR0913
     mode: str,
     options: list[str],
     icon: Path | None = None,
+    artwork: Path | None = None,
     assume_yes: bool = False,
     launch: bool = True,
     ask: Callable[[str], str] = input,
@@ -428,7 +337,9 @@ def ensure_shortcut(  # noqa: PLR0913
     `program mode options -- %command%` with an SVT-GE-Proton compatibility tool,
     and, with `launch`, has Steam start it. Returns its app id, or None, having
     said why, if that isn't so. `icon` is the image file the entry shows; the
-    file needn't exist yet.
+    file needn't exist yet. `artwork` is a directory of Steam's library images
+    (a game's folder in `appcache/librarycache`) whose banner, capsules and
+    logo the entry gets, unless it already has its own (see `install_artwork`).
 
     A missing entry is added. An existing one is left alone unless `options`
     were given and differ from its own, or `icon` isn't its icon, or it has no
@@ -439,8 +350,9 @@ def ensure_shortcut(  # noqa: PLR0913
     """
     location = steam.location
     try:
-        account = account_directory(location)
-        shortcuts_path = account / "config" / "shortcuts.vdf"
+        shortcuts_path = (
+            location.account_directory() / "config" / ("shortcuts.vdf")
+        )
         data = load_shortcuts(shortcuts_path)
         existing = find_shortcut(data, name=name, launch_marker=mode)
         if existing is not None:
@@ -450,6 +362,7 @@ def ensure_shortcut(  # noqa: PLR0913
                 shortcuts_path,
                 data,
                 existing,
+                name=name,
                 program=program,
                 mode=mode,
                 options=options,
@@ -472,15 +385,56 @@ def ensure_shortcut(  # noqa: PLR0913
                 icon=icon,
             )
             print(f'Added "{name}" to your Steam library with {tool_name}.')
+        if artwork is not None:
+            install_artwork(location, app_id, artwork)
         if launch:
             print("Starting it through Steam...")
-            launch_through_steam(location, app_id)
+            location.launch_game(app_id)
         else:
             print("Start Steam and launch it from there.")
-    except ShortcutError as error:
+    except SteamError as error:
         logger.error("%s", error)  # noqa: TRY400
         return None
     return app_id
+
+
+# Steam's library images by the name they have in a game's folder in
+# `appcache/librarycache`, and the suffix they have in the `grid` folder, where
+# a non-Steam game's custom images go: `<app id><suffix>`.
+_ARTWORK = (
+    ("library_hero.jpg", "_hero.jpg"),  # the banner at the top of the page
+    ("library_600x900.jpg", "p.jpg"),  # the portrait capsule
+    ("header.jpg", ".jpg"),  # the wide capsule
+    ("logo.png", "_logo.png"),  # the logo over the banner
+)
+
+
+def install_artwork(
+    location: SteamLocation, app_id: int, source: Path
+) -> list[str]:
+    """Gives the non-Steam game `app_id` the library images in `source`, which
+    Steam made for a game of its own, as its custom images. Images the game
+    already has are left alone (they may be the user's choice), and so are
+    ones `source` doesn't have. Returns the names of the ones copied. Failing
+    to copy is only a warning: the images are decoration."""
+    try:
+        grid = location.account_directory() / "config" / "grid"
+        copied = []
+        for name, suffix in _ARTWORK:
+            image = source / name
+            target = grid / f"{app_id}{suffix}"
+            if image.is_file() and not target.exists():
+                grid.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(image, target)
+                copied.append(target.name)
+    except (OSError, SteamError):
+        logger.warning("Could not copy the images to Steam.", exc_info=True)
+        return []
+    if copied:
+        print(
+            f"Gave it the images {', '.join(copied)} (restart Steam to see)."
+        )
+    return copied
 
 
 def _update_existing(  # noqa: PLR0913
@@ -489,6 +443,7 @@ def _update_existing(  # noqa: PLR0913
     data: collections.OrderedDict[str, object],
     existing: collections.abc.MutableMapping[str, object],
     *,
+    name: str,
     program: list[str],
     mode: str,
     options: list[str],
@@ -501,10 +456,13 @@ def _update_existing(  # noqa: PLR0913
     new_options = bool(options) and options_in(current, mode) != options
     new_icon = icon is not None and existing.get("icon") != str(icon)
     new_target = not str(existing.get("Exe", "")).strip('"')
-    if not (new_options or new_icon or new_target):
+    # Only the name changes: the entry keeps its app id, and so its prefix.
+    new_name = label != name
+    if not (new_options or new_icon or new_target or new_name):
         print(f'"{label}" is already in your Steam library.')
         return
     changes = [
+        *(["name"] if new_name else []),
         *(["launch options"] if new_options else []),
         *(["icon"] if new_icon else []),
         *(["target"] if new_target else []),
@@ -515,6 +473,8 @@ def _update_existing(  # noqa: PLR0913
         assume_yes=assume_yes,
         why=f'update the {" and ".join(changes)} of "{label}"',
     )
+    if new_name:
+        existing["AppName"] = name
     if new_options:
         existing["LaunchOptions"] = with_options(
             current, program, mode, options

@@ -271,8 +271,8 @@ def test_the_flag_that_allows_any_proton_reaches_the_launcher(
         Steam, "from_detection", classmethod(lambda _cls: object())
     )
 
-    def launch(**kwargs: bool) -> int:
-        seen.append(kwargs["allow_any_proton"])
+    def launch(**kwargs: rotk_launcher.LaunchOptions) -> int:
+        seen.append(kwargs["options"].allow_any_proton)
         return 0
 
     monkeypatch.setattr(rotk_launcher, "launch", launch)

@@ -45,13 +45,10 @@ def launch(*, steam: Steam | None = None) -> int:
     install_directory = updater.default_install_directory
 
     if is_linux:
-        if not steam:
-            msg = "steam context must be provided on linux!"
-            raise AssertionError(msg)
         processes: list[Process] = []
         game_id = "1659040"
         processes += [
-            steam.process_in_prefix(
+            Steam.require(steam).process_in_prefix(
                 [str(install_directory / "PeacockPatcher.exe"), *patcher_args],
                 game_id=game_id,
             ),

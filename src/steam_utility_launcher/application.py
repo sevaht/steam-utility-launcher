@@ -444,22 +444,12 @@ def _shortcut_options(argv: Sequence[str], mode: str) -> list[str]:
 def _launch_preset(  # noqa: PLR0913
     mode: str,
     steam: Steam | None,
+    options: rotk_launcher.LaunchOptions,
     *,
-    force: bool,
     configure: bool = True,
     proton: Path | None = None,
-    tpm: bool = False,
-    tpm_endorsement: bool = False,
-    allow_any_proton: bool = False,
-    hud: str | None = None,
-    max_fps: int | None = None,
-    vsync: int | None = None,
-    no_steam_overlay: bool = False,
     steam_command: list[str] | None = None,
     session: CompatSession | None = None,
-    shortcut_options: list[str] | None = None,
-    assume_yes: bool = False,
-    start_shortcut: bool = True,
 ) -> int:
     if mode == "hitman-peacock":
         return hitman_peacock.launch(steam=steam)
@@ -470,23 +460,16 @@ def _launch_preset(  # noqa: PLR0913
     if mode == "rotk-launcher":
         return rotk_launcher.launch(
             steam=steam,
-            force=force,
-            tpm=tpm,
-            tpm_endorsement=tpm_endorsement,
-            allow_any_proton=allow_any_proton,
-            hud=hud,
-            max_fps=max_fps,
-            vsync=vsync,
-            no_steam_overlay=no_steam_overlay,
+            options=options,
             steam_command=steam_command,
             session=session,
-            shortcut_options=shortcut_options,
-            assume_yes=assume_yes,
-            start_shortcut=start_shortcut,
         )
     if mode == "zemu":
         return zemu.launch(
-            steam=steam, force=force, configure=configure, proton=proton
+            steam=steam,
+            force=options.force,
+            configure=configure,
+            proton=proton,
         )
     raise NotImplementedError
 
@@ -572,26 +555,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _launch_preset(
             args.mode,
             steam,
-            force=getattr(args, "force", False),
+            rotk_launcher.LaunchOptions(
+                force=getattr(args, "force", False),
+                tpm=getattr(args, "tpm", False),
+                tpm_endorsement=getattr(args, "tpm_endorsement", False),
+                allow_any_proton=getattr(args, "allow_any_proton", False),
+                hud=(
+                    rotk_launcher.DEFAULT_HUD
+                    if getattr(args, "default_hud", False)
+                    else getattr(args, "hud", None)
+                ),
+                max_fps=getattr(args, "max_fps", None),
+                vsync=getattr(args, "vsync", None),
+                no_steam_overlay=getattr(args, "no_steam_overlay", False),
+                shortcut_options=_shortcut_options(
+                    sys.argv[1:] if argv is None else argv, args.mode
+                ),
+                assume_yes=getattr(args, "yes", False),
+                start_shortcut=not getattr(args, "no_launch", False),
+            ),
             configure=not getattr(args, "no_configure", False),
             proton=Path(proton) if proton else None,
-            tpm=getattr(args, "tpm", False),
-            tpm_endorsement=getattr(args, "tpm_endorsement", False),
-            allow_any_proton=getattr(args, "allow_any_proton", False),
-            hud=(
-                rotk_launcher.DEFAULT_HUD
-                if getattr(args, "default_hud", False)
-                else getattr(args, "hud", None)
-            ),
-            max_fps=getattr(args, "max_fps", None),
-            vsync=getattr(args, "vsync", None),
-            no_steam_overlay=getattr(args, "no_steam_overlay", False),
             steam_command=getattr(args, "steam_command", None),
             session=CompatSession.from_environment(os.environ),
-            shortcut_options=_shortcut_options(
-                sys.argv[1:] if argv is None else argv, args.mode
-            ),
-            assume_yes=getattr(args, "yes", False),
-            start_shortcut=not getattr(args, "no_launch", False),
         )
     return 0

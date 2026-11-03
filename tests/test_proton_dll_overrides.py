@@ -2,11 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from steam_utility_launcher.steam import (
-    CompatibilityTool,
-    Steam,
-    proton_dll_overrides,
-)
+from steam_utility_launcher.steam import CompatibilityTool
+from steam_utility_launcher.wine_prefix import WinePrefix
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -23,7 +20,7 @@ def test_only_the_fixed_overrides_apply_to_a_prefix_without_dxvk(
 ) -> None:
     _dll(tmp_path, "d3d11", b"MZ wine builtin stub")
     assert (
-        proton_dll_overrides(tmp_path)
+        WinePrefix(tmp_path).dll_overrides()
         == "beclient,beclient_x64=b,n;winebth.sys=d"
     )
 
@@ -32,14 +29,15 @@ def test_dxvk_dlls_in_the_prefix_are_made_to_load(tmp_path: Path) -> None:
     for name in ("d3d11", "dxgi"):
         _dll(tmp_path, name, b"..DxvkDevice..")
     _dll(tmp_path, "d3d9", b"MZ wine builtin")
-    overrides = proton_dll_overrides(tmp_path).split(";")
+    overrides = WinePrefix(tmp_path).dll_overrides().split(";")
     assert overrides[0] == "d3d11,d3d10core,dxgi=n"
 
 
 def test_nvapi_is_overridden_when_it_is_installed(tmp_path: Path) -> None:
     _dll(tmp_path, "nvapi64", b"x")
-    assert "nvapi64,nvofapi64,nvapi=n;nvcuda=b" in proton_dll_overrides(
-        tmp_path
+    assert (
+        "nvapi64,nvofapi64,nvapi=n;nvcuda=b"
+        in WinePrefix(tmp_path).dll_overrides()
     )
 
 
@@ -59,20 +57,14 @@ def _proton(root: Path) -> CompatibilityTool:
 
 def test_a_game_goes_through_the_proton_script(tmp_path: Path) -> None:
     tool = _proton(tmp_path)
-    steam = Steam.__new__(Steam)
-    runner, command = steam._proton_launch_command(
-        tool=tool, command_line=["game.exe"], via_script=True
-    )
+    runner, command = tool.launch_command(["game.exe"], via_script=True)
     assert command == [str(tool.binary_path), "waitforexitandrun", "game.exe"]
     assert runner == [str(tmp_path / "Proton/files/bin/wine")]  # for `reg`
 
 
 def test_utilities_still_use_the_bare_wine(tmp_path: Path) -> None:
     tool = _proton(tmp_path)
-    steam = Steam.__new__(Steam)
-    _, command = steam._proton_launch_command(
-        tool=tool, command_line=["util.exe"]
-    )
+    _, command = tool.launch_command(["util.exe"])
     assert command == [str(tmp_path / "Proton/files/bin/wine"), "util.exe"]
 
 
@@ -110,3 +102,34 @@ def test_a_tool_that_runs_a_proton_script_is_one_whatever_it_is_called(
 def test_other_tools_are_not_proton(tmp_path: Path) -> None:
     for name in ("steamlinuxruntime_sniper", "steamlinuxruntime_4"):
         assert not _named(tmp_path, name, "_v2-entry-point").is_proton(), name
+
+
+def test_a_tool_knows_its_own_wine(tmp_path: Path) -> None:
+    assert _proton(tmp_path).wine_binary == tmp_path / "Proton/files/bin/wine"
+    assert _named(tmp_path, "no-wine", "proton").wine_binary is None
+
+
+def test_a_tool_without_a_bare_wine_runs_through_its_script(
+    tmp_path: Path,
+) -> None:
+    tool = _named(tmp_path, "scripted", "proton")
+    runner, command = tool.launch_command(["x.exe"])
+    assert runner == [str(tool.binary_path), "run"]
+    assert command == [str(tool.binary_path), "run", "x.exe"]
+
+
+def test_the_environment_for_a_prefix_has_proton_and_its_overrides(
+    tmp_path: Path,
+) -> None:
+    tool = _proton(tmp_path)
+    prefix = WinePrefix(tmp_path / "pfx")
+    env = {"WINEDLLOVERRIDES": "mine=n"}
+    tool.add_environment(env, prefix, via_script=False)
+    assert env["PROTON_DIR"] == str(tool.binary_path.parent)
+    assert env["WINEDLLOVERRIDES"] == (
+        "beclient,beclient_x64=b,n;winebth.sys=d;mine=n"
+    )
+    # Proton's own script sets those itself
+    scripted: dict[str, str] = {}
+    tool.add_environment(scripted, prefix, via_script=True)
+    assert scripted == {"PROTON_DIR": str(tool.binary_path.parent)}

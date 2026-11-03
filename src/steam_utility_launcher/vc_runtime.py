@@ -4,17 +4,21 @@ import hashlib
 import logging
 import struct
 from dataclasses import dataclass
+from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING
 
 from steam_utility_launcher.github_release_updater import (
     XDG_DATA_ROOT,
     https_get,
 )
+from steam_utility_launcher.wine_prefix import is_wine_builtin
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
-    from steam_utility_launcher.steam import CompatSession, Steam
+    from steam_utility_launcher.steam import Process
+    from steam_utility_launcher.wine_prefix import WinePrefix
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +53,6 @@ _DLLS = (
 _X64_ONLY_DLLS = ("vcruntime140_1",)
 # The ones whose version is checked (a builtin vcruntime140.dll has none).
 _VERSIONED_DLLS = frozenset({"msvcp140", "vcruntime140"})
-_BUILTIN_MARKERS = (b"Wine builtin DLL", b"Wine placeholder DLL")
-_BUILTIN_MARKER_SPAN = 128  # the marker sits in the DOS header, at 0x40
 
 _CACHE_DIRECTORY_NAME = "VC-Redist"
 _VS_FIXEDFILEINFO_SIGNATURE = b"\xbd\x04\xef\xfe"
@@ -109,31 +111,7 @@ def file_version(path: Path) -> tuple[int, int, int, int] | None:
     return (most >> 16, most & 0xFFFF, least >> 16, least & 0xFFFF)
 
 
-def is_wine_builtin(path: Path) -> bool:
-    """Whether the file is Wine's own stand-in and not a Microsoft binary.
-
-    Wine marks its builtin DLLs in the DOS header. Symlinks are followed, so
-    a link to a builtin counts as one.
-    """
-    try:
-        with path.open("rb") as stream:
-            head = stream.read(_BUILTIN_MARKER_SPAN)
-    except OSError:
-        return False
-    return any(marker in head for marker in _BUILTIN_MARKERS)
-
-
-def _dll_path(prefix: Path, redist: _Redistributable, name: str) -> Path:
-    return (
-        prefix
-        / "drive_c"
-        / "windows"
-        / redist.system_directory
-        / f"{name}.dll"
-    )
-
-
-def _problems(prefix: Path, redist: _Redistributable) -> list[str]:
+def _problems(prefix: WinePrefix, redist: _Redistributable) -> list[str]:
     """What is wrong with this build's DLLs in the prefix, one entry per file.
 
     Empty when every one is a real Microsoft binary (and msvcp140.dll and
@@ -141,8 +119,8 @@ def _problems(prefix: Path, redist: _Redistributable) -> list[str]:
     """
     problems = []
     for name in redist.dlls:
-        path = _dll_path(prefix, redist, name)
-        label = f"{redist.system_directory}\\{name}.dll"
+        path = prefix.system_dll(redist.system_directory, name)
+        label = str(PureWindowsPath(redist.system_directory, f"{name}.dll"))
         if not path.is_file():
             problems.append(f"{label}: missing")
         elif is_wine_builtin(path):
@@ -155,7 +133,7 @@ def _problems(prefix: Path, redist: _Redistributable) -> list[str]:
     return problems
 
 
-def outdated_redistributables(prefix: Path) -> list[_Redistributable]:
+def outdated_redistributables(prefix: WinePrefix) -> list[_Redistributable]:
     return [r for r in _REDISTRIBUTABLES if _problems(prefix, r)]
 
 
@@ -192,20 +170,15 @@ def _cached_installer(redist: _Redistributable) -> Path:
     return installer
 
 
-def _run_installer(  # noqa: PLR0913
-    steam: Steam,
-    game_id: str,
+def _run_installer(
+    run: Callable[[list[str]], Process],
     redist: _Redistributable,
     installer: Path,
     mode: str,
-    session: CompatSession | None,
 ) -> None:
-    process = steam.process_in_prefix(
-        [str(installer), mode, "/quiet", "/norestart"],
-        game_id=game_id,
-        session=session,
+    return_code = (
+        run([str(installer), mode, "/quiet", "/norestart"]).start().wait()
     )
-    return_code = process.start().wait()
     if return_code not in _ACCEPTED_EXIT_CODES:
         logger.warning(
             "The %s installer (%s) exited with status %s.",
@@ -216,16 +189,12 @@ def _run_installer(  # noqa: PLR0913
 
 
 def ensure_current(
-    *,
-    steam: Steam,
-    prefix: Path,
-    game_id: str,
-    session: CompatSession | None = None,
+    prefix: WinePrefix, *, run: Callable[[list[str]], Process]
 ) -> None:
-    """Installs Microsoft's Visual C++ runtime into the prefix (the game's, or
-    the one of `session`), unless every runtime DLL in it is already a real
-    Microsoft file (and msvcp140.dll and vcruntime140.dll are at least
-    MINIMUM_VERSION).
+    """Installs Microsoft's Visual C++ runtime into the prefix, unless every
+    runtime DLL in it is already a real Microsoft file (and msvcp140.dll and
+    vcruntime140.dll are at least MINIMUM_VERSION). `run` starts a command in
+    that same prefix.
 
     A new Proton prefix only has Wine's builtin stand-ins, which claim to be
     14.42 and so must be told apart from the real thing by their marker.
@@ -248,7 +217,7 @@ def ensure_current(
                 mode,
                 "; ".join(_problems(prefix, redist)[:3]),
             )
-            _run_installer(steam, game_id, redist, installer, mode, session)
+            _run_installer(run, redist, installer, mode)
     remaining = [
         problem
         for redist in _REDISTRIBUTABLES

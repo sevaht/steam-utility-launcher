@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import logging
-import os
 from dataclasses import dataclass
 from importlib import resources
+from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
-logger = logging.getLogger(__name__)
+    from steam_utility_launcher.wine_prefix import WinePrefix
 
 
 @dataclass(frozen=True)
@@ -20,6 +17,10 @@ class _Patch:
 
 
 _POWERSHELL = ("WindowsPowerShell", "v1.0", "powershell.exe")
+# Where the stand-in is, as a Windows program in the prefix names it.
+POWERSHELL_STAND_IN_PATH = str(
+    PureWindowsPath("C:/windows/system32", *_POWERSHELL)
+)
 _PATCHES = (
     # ROTK Launcher's hardware fingerprint query and the installer's "is the
     # app running" checks; see resources/wine_powershell_hwid.c. 32-bit
@@ -29,20 +30,7 @@ _PATCHES = (
 )
 
 
-def _target_path(prefix: Path, patch: _Patch) -> Path:
-    return prefix.joinpath("drive_c", "windows", *patch.target)
-
-
-def _is_current(target: Path, wanted: bytes) -> bool:
-    return (
-        not target.is_symlink()
-        and target.is_file()
-        and os.access(target, os.X_OK)
-        and target.read_bytes() == wanted
-    )
-
-
-def ensure_wine_patches(prefix: Path) -> None:
+def ensure_wine_patches(prefix: WinePrefix) -> None:
     """Makes sure the compatibility replacements are in a Proton prefix,
     installing or refreshing whichever are missing or differ. They are left
     in place: nothing here is ever removed. Only the given prefix is touched;
@@ -65,14 +53,5 @@ def ensure_wine_patches(prefix: Path) -> None:
     touched.
     """
     for patch in _PATCHES:
-        target = _target_path(prefix, patch)
         source = resources.files(__package__) / "resources" / patch.resource
-        wanted = source.read_bytes()
-        if _is_current(target, wanted):
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.is_symlink() or target.exists():
-            target.unlink()
-        target.write_bytes(wanted)
-        target.chmod(0o755)
-        logger.info(f"Installed {patch.resource} at: {target}")
+        prefix.install_file(patch.target, source.read_bytes(), executable=True)

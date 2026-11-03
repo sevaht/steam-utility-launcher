@@ -17,15 +17,6 @@ def _record(verdict: str) -> str:
     )
 
 
-def test_wine_path_uses_the_z_drive() -> None:
-    from pathlib import PurePosixPath
-
-    assert (
-        powershell_log.wine_path(PurePosixPath("/home/me/.local/x.log"))  # type: ignore[arg-type]
-        == "Z:\\home\\me\\.local\\x.log"
-    )
-
-
 def test_size_of_a_missing_log_is_zero(tmp_path: Path) -> None:
     assert powershell_log.size(tmp_path / "nope.log") == 0
 

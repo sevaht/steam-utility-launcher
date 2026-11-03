@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import KeysView, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -15,9 +16,28 @@ from typing import Union
 
 import vdf  # type: ignore[import-untyped]
 
+from steam_utility_launcher.wine_prefix import WinePrefix
+
 VDFTree = Mapping[str, Union[str, "VDFTree"]]
 
 logger = logging.getLogger(__name__)
+
+_STEAM_ID64_BASE = 76561197960265728
+_SHUTDOWN_WAIT_SECONDS = 90
+_SHUTDOWN_POLL_SECONDS = 1.0
+# The low bits of the id Steam uses for a non-Steam game (app id << 32 | this).
+_NON_STEAM_GAME_FLAG = 0x02000000
+
+
+class SteamError(RuntimeError):
+    """Steam's files or client don't allow what was asked; the message says
+    why."""
+
+
+def _wine_beside(proton_script: Path) -> Path | None:
+    """Proton's own `wine`, which sits beside its `proton` script, or None."""
+    wine = proton_script.parent / "files" / "bin" / "wine"
+    return wine if wine.exists() else None
 
 
 @dataclass
@@ -37,8 +57,8 @@ class Process:
             return ["wine"]
         proton_binary = Path(self.prefix_runner[0])
         if proton_binary.name == "proton":
-            wine_binary = proton_binary.parent / "files" / "bin" / "wine"
-            if wine_binary.exists():
+            wine_binary = _wine_beside(proton_binary)
+            if wine_binary is not None:
                 return [str(wine_binary)]
         return list(self.prefix_runner)
 
@@ -311,6 +331,48 @@ class CompatibilityTool:
             for tool_arg in self.binary_argument_template
         ]
 
+    @property
+    def wine_binary(self) -> Path | None:
+        """The `wine` that runs a process in a prefix without Proton's script
+        (None for a tool that has none)."""
+        return _wine_beside(self.binary_path)
+
+    def launch_command(
+        self, command_line: list[str], *, via_script: bool = False
+    ) -> tuple[list[str], list[str]]:
+        """What to run, and what to run `reg` with, to start `command_line` in
+        a prefix with this tool: Proton's bare `wine`, or with `via_script` its
+        own `proton` script, as Steam starts a game."""
+        proton_wine = self.wine_binary
+        if proton_wine is not None:
+            prefix_runner = [str(proton_wine)]
+            if via_script:
+                # The verb Steam launches games with: first waits for any
+                # earlier session in the prefix to end. (`reg` edits still
+                # use the bare wine; see Process.)
+                logger.info(
+                    "Starting through Proton; this first waits for any"
+                    " earlier Wine session in the prefix to exit."
+                )
+                return prefix_runner, [
+                    *self.command_line(verb=Verb.WAIT_FOR_EXIT_AND_RUN),
+                    *command_line,
+                ]
+            return prefix_runner, [str(proton_wine), *command_line]
+        prefix_runner = self.command_line(verb=Verb.RUN)
+        return prefix_runner, prefix_runner + command_line
+
+    def add_environment(
+        self, env: dict[str, str], prefix: WinePrefix, *, via_script: bool
+    ) -> None:
+        """The variables a process needs to run in `prefix` with this tool."""
+        env["PROTON_DIR"] = str(self.binary_path.parent)
+        if not via_script:  # the script sets these itself
+            existing = env.get("WINEDLLOVERRIDES", "")
+            env["WINEDLLOVERRIDES"] = ";".join(
+                part for part in (prefix.dll_overrides(), existing) if part
+            )
+
 
 @dataclass(frozen=True)
 class CompatSession:
@@ -328,6 +390,10 @@ class CompatSession:
     @property
     def prefix(self) -> Path:
         return self.compat_data_path / "pfx"
+
+    @property
+    def wine_prefix(self) -> WinePrefix:
+        return WinePrefix(self.prefix)
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str]) -> CompatSession | None:
@@ -384,6 +450,91 @@ class SteamLocation:
     def library_folders_vdf(self) -> Path:
         return self.steamapps / "libraryfolders.vdf"
 
+    def client_program(self) -> str:
+        """What starts the Steam client: `steam` if it is on the PATH, else
+        the script in Steam's own folder."""
+        return shutil.which("steam") or str(self.root / "steam.sh")
+
+    @staticmethod
+    def is_client_running() -> bool:
+        """Whether this user has a Steam client running."""
+        uid = os.getuid()
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                if (
+                    entry / "comm"
+                ).read_text().strip() == "steam" and entry.stat().st_uid == uid:
+                    return True
+            except OSError:
+                continue
+        return False
+
+    def shut_down_client(self) -> None:
+        """Asks Steam to exit and waits until it has."""
+        logger.info("Closing Steam...")
+        try:
+            subprocess.run(  # noqa: S603
+                [self.client_program(), "-shutdown"], check=False, timeout=30
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            msg = f"Could not tell Steam to close: {error}"
+            raise SteamError(msg) from error
+        deadline = time.monotonic() + _SHUTDOWN_WAIT_SECONDS
+        while self.is_client_running():
+            if time.monotonic() > deadline:
+                msg = "Steam did not close; close it yourself and try again."
+                raise SteamError(msg)
+            time.sleep(_SHUTDOWN_POLL_SECONDS)
+
+    def launch_game(self, app_id: int) -> None:
+        """Has Steam start the non-Steam game, starting Steam first if it
+        isn't running (the game then starts once it is up). Steam runs on its
+        own, not as a child of this program."""
+        game_id = (app_id << 32) | _NON_STEAM_GAME_FLAG
+        try:
+            subprocess.Popen(  # noqa: S603
+                [self.client_program(), f"steam://rungameid/{game_id}"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as error:
+            msg = f"Could not start the game through Steam: {error}"
+            raise SteamError(msg) from error
+
+    def account_directory(self) -> Path:
+        """`userdata/<account>` of the Steam account in use: the one that last
+        signed in (or the only one there is)."""
+        try:
+            users = vdf.load(
+                (self.root / "config" / "loginusers.vdf").open(
+                    encoding="utf-8"
+                )
+            )["users"]
+        except (OSError, KeyError, SyntaxError) as error:
+            msg = f"Could not read Steam's accounts: {error}"
+            raise SteamError(msg) from error
+        recent = [
+            steam_id
+            for steam_id, user in users.items()
+            if any(
+                key.lower() == "mostrecent" and value == "1"
+                for key, value in user.items()
+            )
+        ]
+        candidates = recent or list(users)
+        if len(candidates) != 1:
+            msg = (
+                "Could not tell which Steam account to add the shortcut to;"
+                " sign in to the one you want in Steam, then try again."
+            )
+            raise SteamError(msg)
+        account = int(candidates[0]) - _STEAM_ID64_BASE
+        return self.root / "userdata" / str(account)
+
     @property
     def library_paths(self) -> list[Path]:
         paths = [self.root]
@@ -407,57 +558,6 @@ class SteamLocation:
             if path not in paths:
                 paths.append(path)
         return paths
-
-
-_DXVK_DLLS = ("d3d11", "d3d10core", "d3d9", "dxgi")
-_NVAPI_DLLS = ("nvapi64", "nvofapi64", "nvapi")
-
-
-def _in_windows_directory(prefix: Path, directory: str, name: str) -> Path:
-    return prefix / "drive_c" / "windows" / directory / f"{name}.dll"
-
-
-def _is_dxvk(prefix: Path, name: str) -> bool:
-    try:
-        content = _in_windows_directory(prefix, "system32", name).read_bytes()
-    except OSError:
-        return False
-    return b"dxvk" in content.lower()
-
-
-def proton_dll_overrides(prefix: Path) -> str:
-    """The DLL overrides Proton's `proton` script would set for this prefix.
-
-    This tool runs Proton's bare `wine` rather than the `proton` script, so
-    without these Wine silently uses its own (OpenGL) Direct3D instead of the
-    DXVK that Proton put in the prefix, which is far slower. Only DLLs that are
-    actually in the prefix are overridden, so a prefix Proton hasn't set up
-    yet (or one set to use WineD3D) is left alone.
-    """
-    parts = []
-    # d3d10core is only a thin forwarder to d3d11 and has no marker of its own.
-    dxvk = [
-        name
-        for name in _DXVK_DLLS
-        if _is_dxvk(prefix, "d3d11" if name == "d3d10core" else name)
-    ]
-    if dxvk:
-        parts.append(f"{','.join(dxvk)}=n")
-    if any(
-        _in_windows_directory(prefix, "system32", name).is_file()
-        for name in _NVAPI_DLLS
-    ):
-        parts.append("nvapi64,nvofapi64,nvapi=n;nvcuda=b")
-    # As Proton always does: BattlEye's client, and a driver that crashes.
-    parts.extend(("beclient,beclient_x64=b,n", "winebth.sys=d"))
-    return ";".join(parts)
-
-
-def _add_proton_overrides(env: dict[str, str], prefix: Path) -> None:
-    existing = env.get("WINEDLLOVERRIDES", "")
-    env["WINEDLLOVERRIDES"] = ";".join(
-        part for part in (proton_dll_overrides(prefix), existing) if part
-    )
 
 
 @dataclass
@@ -516,6 +616,31 @@ class Steam:
     def from_detection(cls) -> Steam:
         return cls.from_location(SteamLocation.from_detection())
 
+    @staticmethod
+    def require(steam: Steam | None) -> Steam:
+        """`steam`, which every utility that runs a game's process in a prefix
+        is given on Linux (where Steam is), as an error if it was not."""
+        if not steam:
+            msg = "steam context must be provided on linux!"
+            raise AssertionError(msg)
+        return steam
+
+    def prefixes(self) -> list[WinePrefix]:
+        """The prefix of every game in Steam's libraries (Steam's own, and the
+        non-Steam games Steam makes one for), by the id it was made for."""
+        found: list[WinePrefix] = []
+        for library in self.location.library_paths:
+            try:
+                found.extend(
+                    WinePrefix(path)
+                    for path in sorted(
+                        (library / "steamapps" / "compatdata").glob("*/pfx")
+                    )
+                )
+            except OSError:
+                continue
+        return found
+
     def game_compatibility_tool(self, game_id: str) -> str:
         steam_section = VDFNode.from_path(self.location.config_vdf).section(
             ["InstallConfigStore", "Software", "Valve", "Steam"]
@@ -546,6 +671,9 @@ class Steam:
     def game_wine_prefix(self, *, game_id: str) -> Path:
         return self.game_compatdata_path(game_id=game_id) / "pfx"
 
+    def game_prefix(self, *, game_id: str) -> WinePrefix:
+        return WinePrefix(self.game_wine_prefix(game_id=game_id))
+
     def tool_for_session(
         self, session: CompatSession
     ) -> CompatibilityTool | None:
@@ -555,26 +683,6 @@ class Steam:
             if tool.install_path.resolve() == wanted:
                 return tool
         return None
-
-    def _ensure_steamapps_mapping(
-        self, *, game_id: str, prefix: Path | None = None
-    ) -> None:
-        """Makes drive S: of the prefix (the game's own, unless one is given)
-        the Steam library the game is in."""
-        if prefix is None:
-            prefix = self.game_wine_prefix(game_id=game_id)
-        dosdevices = prefix / "dosdevices"
-        dosdevices.mkdir(parents=True, exist_ok=True)
-        drive_s = dosdevices / "s:"
-        target = self.game_library_path(game_id=game_id)
-        if drive_s.exists() or drive_s.is_symlink():
-            try:
-                if drive_s.resolve() == target.resolve():
-                    return
-            except OSError:
-                pass
-            drive_s.unlink()
-        drive_s.symlink_to(target)
 
     def matching_compatibility_tools(
         self, tool_name: str
@@ -643,10 +751,10 @@ class Steam:
         is_wine = False
         prefix_runner: list[str] | None = None
         if session is not None:
-            prefix = session.prefix
+            prefix = session.wine_prefix
             compat_data_path = session.compat_data_path
         else:
-            prefix = self.game_wine_prefix(game_id=game_id)
+            prefix = self.game_prefix(game_id=game_id)
             compat_data_path = self.game_compatdata_path(game_id=game_id)
         if system_wine:
             is_wine = True
@@ -656,23 +764,19 @@ class Steam:
             tool = self._tool_to_run_with(game_id=game_id, session=session)
             if tool is not None and tool.is_proton():
                 is_wine = True
-                prefix_runner, command_line = self._proton_launch_command(
-                    tool=tool,
-                    command_line=command_line,
-                    via_script=via_proton_script,
+                prefix_runner, command_line = tool.launch_command(
+                    command_line, via_script=via_proton_script
                 )
-                self._add_proton_environment(
-                    env, tool=tool, prefix=prefix, via_script=via_proton_script
-                )
+                tool.add_environment(env, prefix, via_script=via_proton_script)
         if is_wine:
             if session is None:  # Proton drops the S: drive of a shortcut
-                self._ensure_steamapps_mapping(game_id=game_id, prefix=prefix)
+                prefix.map_drive("s", self.game_library_path(game_id=game_id))
             env.update(
                 {
                     "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(
                         self.location.root
                     ),
-                    "WINEPREFIX": str(prefix),
+                    "WINEPREFIX": str(prefix.path),
                     "STEAM_COMPAT_DATA_PATH": str(compat_data_path),
                     "SteamAppId": game_id,
                     "SteamGameId": game_id,
@@ -716,42 +820,3 @@ class Steam:
             msg = f"Multiple compatibility tools matched: {tool_name}"
             raise RuntimeError(msg)
         return matched_tools[0]
-
-    def _add_proton_environment(
-        self,
-        env: dict[str, str],
-        *,
-        tool: CompatibilityTool,
-        prefix: Path,
-        via_script: bool,
-    ) -> None:
-        env["PROTON_DIR"] = str(tool.binary_path.parent)
-        if not via_script:  # the script sets these itself
-            _add_proton_overrides(env, prefix)
-
-    def _proton_launch_command(
-        self,
-        *,
-        tool: CompatibilityTool,
-        command_line: list[str],
-        via_script: bool = False,
-    ) -> tuple[list[str], list[str]]:
-        proton_binary = Path(tool.command_line(verb=Verb.RUN)[0])
-        proton_wine = proton_binary.parent / "files" / "bin" / "wine"
-        if proton_wine.exists():
-            prefix_runner = [str(proton_wine)]
-            if via_script:
-                # The verb Steam launches games with: first waits for any
-                # earlier session in the prefix to end. (`reg` edits still
-                # use the bare wine; see Process.)
-                logger.info(
-                    "Starting through Proton; this first waits for any"
-                    " earlier Wine session in the prefix to exit."
-                )
-                return prefix_runner, [
-                    *tool.command_line(verb=Verb.WAIT_FOR_EXIT_AND_RUN),
-                    *command_line,
-                ]
-            return prefix_runner, [str(proton_wine), *command_line]
-        prefix_runner = tool.command_line(verb=Verb.RUN)
-        return prefix_runner, prefix_runner + command_line

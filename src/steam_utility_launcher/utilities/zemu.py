@@ -26,6 +26,7 @@ from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
 from steam_utility_launcher import minisign, update_check
+from steam_utility_launcher.games import Z1_BATTLE_ROYALE_ID
 from steam_utility_launcher.github_release_updater import (
     XDG_DATA_ROOT,
     ApplicationUpdater,
@@ -70,7 +71,7 @@ _APP_IDENTIFIER = "uk.zemu.launcher"
 _CONFIG_FILE_NAME = "launcher-config.json"
 # ZEmu's client is Steam app 433850, the same one as Z1 Battle Royale, so the
 # Proton Steam already uses for that game is a known-good choice.
-_Z1_GAME_ID = "433850"
+_Z1_GAME_ID = Z1_BATTLE_ROYALE_ID
 _STABLE_PROTON_NAME = re.compile(r"^proton_(\d+)(?:\.(\d+))?$")
 # What ZEmu Launcher itself uses when it creates the Wine settings.
 _DEFAULT_WINE_ENV = (

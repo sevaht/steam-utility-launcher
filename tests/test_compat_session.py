@@ -117,3 +117,27 @@ def test_a_session_whose_tool_is_not_installed_is_an_error(
         steam.process_in_prefix(
             ["C:\\setup.exe"], game_id=GAME_ID, session=session
         )
+
+
+def test_steam_is_required_where_a_process_runs_in_a_prefix(
+    tmp_path: Path,
+) -> None:
+    steam = _steam(tmp_path)
+    assert Steam.require(steam) is steam
+    with pytest.raises(AssertionError, match="steam context"):
+        Steam.require(None)
+
+
+def test_every_prefix_in_the_libraries_is_found_by_the_id_it_was_made_for(
+    tmp_path: Path,
+) -> None:
+    compatdata = tmp_path / "steamapps" / "compatdata"
+    for name in ("42", "3574495053"):
+        (compatdata / name / "pfx").mkdir(parents=True)
+    (compatdata / "7").mkdir()  # a game that never got a prefix
+    steam = _steam(tmp_path)
+    assert [p.compat_data_path.name for p in steam.prefixes()] == [
+        "3574495053",
+        "42",
+    ]
+    assert _steam(tmp_path / "nowhere").prefixes() == []

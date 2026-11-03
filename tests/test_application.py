@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from steam_utility_launcher import application
@@ -7,10 +9,10 @@ from steam_utility_launcher.steam import Steam
 from steam_utility_launcher.utilities import rotk_launcher
 
 
-def _launches(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+def _launches(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Runs rotk-launcher without launching anything; returns what it was
     called with."""
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
     monkeypatch.setattr("sys.platform", "linux")
     monkeypatch.setattr(
         Steam, "from_detection", classmethod(lambda _cls: object())
@@ -29,7 +31,7 @@ def test_no_overlay_is_requested_by_default(
 ) -> None:
     calls = _launches(monkeypatch)
     application.main(["rotk-launcher"])
-    assert calls[0]["hud"] is None
+    assert calls[0]["options"].hud is None
 
 
 def test_the_overlay_value_is_forwarded_untouched(
@@ -39,7 +41,7 @@ def test_the_overlay_value_is_forwarded_untouched(
     application.main(
         ["rotk-launcher", "--hud", "fps,gpuload,scale=1.5,opacity=0.8"]
     )
-    assert calls[0]["hud"] == "fps,gpuload,scale=1.5,opacity=0.8"
+    assert calls[0]["options"].hud == "fps,gpuload,scale=1.5,opacity=0.8"
 
 
 def test_the_default_overlay_is_the_preferred_one(
@@ -47,7 +49,7 @@ def test_the_default_overlay_is_the_preferred_one(
 ) -> None:
     calls = _launches(monkeypatch)
     application.main(["rotk-launcher", "--default-hud"])
-    assert calls[0]["hud"] == rotk_launcher.DEFAULT_HUD
+    assert calls[0]["options"].hud == rotk_launcher.DEFAULT_HUD
 
 
 def test_an_overlay_cannot_be_both_given_and_the_default(
@@ -78,7 +80,7 @@ def test_no_frame_rate_limit_by_default(
 ) -> None:
     calls = _launches(monkeypatch)
     application.main(["rotk-launcher"])
-    assert calls[0]["max_fps"] is None
+    assert calls[0]["options"].max_fps is None
 
 
 def test_the_frame_rate_limit_is_forwarded_as_a_number(
@@ -86,7 +88,7 @@ def test_the_frame_rate_limit_is_forwarded_as_a_number(
 ) -> None:
     calls = _launches(monkeypatch)
     application.main(["rotk-launcher", "--max-fps", "144"])
-    assert calls[0]["max_fps"] == 144
+    assert calls[0]["options"].max_fps == 144
 
 
 @pytest.mark.parametrize("value", ["0", "-5", "fast", "60.5"])
@@ -107,7 +109,7 @@ def test_vsync_is_not_overridden_by_default(
 ) -> None:
     calls = _launches(monkeypatch)
     application.main(["rotk-launcher"])
-    assert calls[0]["vsync"] is None
+    assert calls[0]["options"].vsync is None
 
 
 @pytest.mark.parametrize("value", [0, 1, 2, 4])
@@ -116,7 +118,7 @@ def test_the_vsync_interval_is_forwarded_as_a_number(
 ) -> None:
     calls = _launches(monkeypatch)
     application.main(["rotk-launcher", "--vsync", str(value)])
-    assert calls[0]["vsync"] == value  # 0 stays 0, not "unset"
+    assert calls[0]["options"].vsync == value  # 0 stays 0, not "unset"
 
 
 @pytest.mark.parametrize("value", ["5", "-1", "on", "0.5"])
@@ -137,7 +139,7 @@ def test_the_steam_overlay_is_not_taken_away_by_default(
 ) -> None:
     calls = _launches(monkeypatch)
     application.main(["rotk-launcher"])
-    assert calls[0]["no_steam_overlay"] is False
+    assert calls[0]["options"].no_steam_overlay is False
 
 
 def test_taking_the_steam_overlay_away_is_forwarded(
@@ -145,7 +147,7 @@ def test_taking_the_steam_overlay_away_is_forwarded(
 ) -> None:
     calls = _launches(monkeypatch)
     application.main(["rotk-launcher", "--no-steam-overlay"])
-    assert calls[0]["no_steam_overlay"] is True
+    assert calls[0]["options"].no_steam_overlay is True
 
 
 @pytest.mark.parametrize(

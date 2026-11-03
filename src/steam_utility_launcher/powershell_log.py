@@ -23,11 +23,6 @@ def path() -> Path:
     return XDG_DATA_ROOT / _LOG_NAME
 
 
-def wine_path(host_path: Path) -> str:
-    """The same file as Wine sees it (the host's root is drive Z:)."""
-    return "Z:" + str(host_path).replace("/", "\\")
-
-
 def size(log: Path) -> int:
     try:
         return log.stat().st_size
