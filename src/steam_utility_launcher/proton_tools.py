@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import platform
 import re
+import shutil
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,9 @@ logger = logging.getLogger(__name__)
 
 # Written into the tool's folder so an update can tell what is installed.
 TAG_FILE_NAME = ".release_tag"
+# Proton's own per-tool defaults for environment variables ("for all games run
+# in this Proton version"). It is the user's, so an update has to keep it.
+USER_SETTINGS_FILE_NAME = "user_settings.py"
 _ARCHITECTURES = frozenset({"x86_64", "AMD64"})
 _CHECKSUM_LINE_PART_COUNT = 2
 _REVISION_SUFFIX = re.compile(r"-r[0-9]+$")
@@ -54,6 +58,18 @@ class ProtonSource:
     # A release's tag from the version file in an installed tool ("<time>
     # <version>"), for a tool that was unpacked by hand.
     tag_for_version: Callable[[str], str]
+    # Every user_settings.py this source has ever generated, oldest first; the
+    # last is the one a new install gets when it has none to take over (see
+    # _user_settings_donor). Empty for a source that makes none.
+    user_settings_versions: tuple[str, ...] = ()
+
+    @property
+    def default_user_settings(self) -> str:
+        return (
+            self.user_settings_versions[-1]
+            if self.user_settings_versions
+            else ""
+        )
 
     def owns(self, tool: CompatibilityTool) -> bool:
         return self.tool_pattern.fullmatch(tool.internal_name) is not None
@@ -85,6 +101,32 @@ def _svt_tool_name(tag: str) -> str:
     return f"SVT-GE-Proton-{match['series']}"
 
 
+# Run by Proton each time it starts a game, so what it decides follows the
+# session the game is started from, not the one this was written in. Proton
+# itself uses the Wayland driver only with a Wayland display, and a variable
+# already in the environment wins over these.
+_SVT_USER_SETTINGS_V1 = """\
+# Defaults for every game run with this Proton. A value already in the
+# environment (Steam's, or a game's launch options) wins over these.
+#
+# Made once by `steam-utility-launcher proton svt-ge`, and yours after that:
+# it is kept across updates (and given to the next series), so edit it freely.
+import os
+
+user_settings = {}
+
+# Checked each time Proton starts: only a Wayland session has this display.
+if os.environ.get("WAYLAND_DISPLAY"):
+    user_settings["PROTON_ENABLE_WAYLAND"] = "1"
+"""
+
+# EVERY version of the file the source has generated, oldest first, the one
+# new installs get last. An installed file that is exactly an older one was
+# never edited, so it is brought up to the last (_refresh_user_settings). So
+# never change a version in place (a test pins their hashes): add the new one
+# at the end and pin it there.
+_SVT_USER_SETTINGS_VERSIONS = (_SVT_USER_SETTINGS_V1,)
+
 SVT_GE_PROTON = ProtonSource(
     key="svt-ge",
     title="SVT-GE-Proton",
@@ -93,6 +135,7 @@ SVT_GE_PROTON = ProtonSource(
     tool_name_for_tag=_svt_tool_name,
     tool_pattern=re.compile(r"SVT-GE-Proton-[0-9]+"),
     tag_for_version=lambda version: f"svt-{version}",
+    user_settings_versions=_SVT_USER_SETTINGS_VERSIONS,
 )
 
 SOURCES = (GE_PROTON, SVT_GE_PROTON)
@@ -200,6 +243,93 @@ def _extract(archive: Path, destination: Path, tool_name: str) -> Path:
     return tool
 
 
+def _has_user_settings(tool: Path) -> bool:
+    path = tool / USER_SETTINGS_FILE_NAME
+    return path.is_symlink() or path.is_file()
+
+
+def _version_key(name: str) -> list[int]:
+    """GE-Proton10-3 comes after GE-Proton9-20 (numbers, not text)."""
+    return [int(part) for part in re.findall(r"[0-9]+", name)]
+
+
+def _user_settings_donor(
+    source: ProtonSource, tools_directory: Path, target: Path
+) -> Path | None:
+    """The installed tool whose user_settings.py a new install at `target`
+    takes over: the one it replaces, else the newest other tool of the same
+    source (the previous GE release, or the previous series of ours)."""
+    if target.is_dir() and _has_user_settings(target):
+        return target
+    others = sorted(
+        (
+            path
+            for path in tools_directory.iterdir()
+            if path != target
+            and path.is_dir()
+            and source.tool_pattern.fullmatch(path.name)
+        ),
+        key=lambda path: _version_key(path.name),
+        reverse=True,
+    )
+    return next((path for path in others if _has_user_settings(path)), None)
+
+
+def _keep_user_settings(donor: Path, new: Path) -> None:
+    """Gives the new tool the user_settings.py of `donor` (as a link if it is
+    one: Proton follows links)."""
+    destination = new / USER_SETTINGS_FILE_NAME
+    destination.unlink(missing_ok=True)
+    shutil.copy2(
+        donor / USER_SETTINGS_FILE_NAME, destination, follow_symlinks=False
+    )
+    logger.info(
+        "Kept %s of %s in %s.", USER_SETTINGS_FILE_NAME, donor.name, new.name
+    )
+
+
+def _refresh_user_settings(source: ProtonSource, tool: Path) -> bool:
+    """Brings a user_settings.py that is exactly one of the source's older
+    generated versions up to the current one, and says whether it did. A file
+    with any change in it (or a link, which is the user's way of managing it)
+    is never touched."""
+    path = tool / USER_SETTINGS_FILE_NAME
+    current = source.default_user_settings
+    if not current or path.is_symlink() or not path.is_file():
+        return False
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+    if text == current or text not in source.user_settings_versions:
+        return False
+    path.write_text(current)
+    logger.info("Updated %s of %s.", USER_SETTINGS_FILE_NAME, tool.name)
+    return True
+
+
+def _generate_user_settings(source: ProtonSource, new: Path) -> None:
+    """The source's default user_settings.py, if the tool has none."""
+    if source.default_user_settings and not _has_user_settings(new):
+        (new / USER_SETTINGS_FILE_NAME).write_text(
+            source.default_user_settings
+        )
+        logger.info("Made %s in %s.", USER_SETTINGS_FILE_NAME, new.name)
+
+
+def _settings_for_new_tool(
+    source: ProtonSource, tools_directory: Path, target: Path, new: Path
+) -> None:
+    """The user_settings.py of a tool being installed at `target`: the user's
+    (see _user_settings_donor), else the default, and brought up to date if it
+    is an untouched older default."""
+    donor = _user_settings_donor(source, tools_directory, target)
+    if donor is not None:
+        _keep_user_settings(donor, new)
+    _generate_user_settings(source, new)
+    _refresh_user_settings(source, new)
+
+
 def install(
     steam: Steam, source: ProtonSource, *, tag: str = "", force: bool = False
 ) -> bool:
@@ -217,6 +347,8 @@ def install(
         and is_current(source, target, release.tag)
     ):
         print(f"{tool_name} is up to date ({release.tag}).")
+        if _refresh_user_settings(source, target):
+            print(f"Updated its {USER_SETTINGS_FILE_NAME} to the new default.")
         return False
     archive_asset = Path(f"{tool_name}.tar.gz")
     checksums_asset = Path(f"{tool_name}.sha512sum")
@@ -250,6 +382,7 @@ def install(
         print("Unpacking...")
         new_tool = _extract(archive, staging / "unpacked", tool_name)
         (new_tool / TAG_FILE_NAME).write_text(release.tag)
+        _settings_for_new_tool(source, tools_directory, target, new_tool)
         previous = staging / "previous"
         if target.exists():
             target.rename(previous)

@@ -25,6 +25,33 @@ logger = logging.getLogger(__name__)
 # three seconds after it loads. 14.40 is the first release that handles it.
 MINIMUM_VERSION = (14, 40)
 
+# Without the real runtime the game dies a few minutes into a match: Wine's
+# builtin vcruntime140.dll only has a stub for __C_specific_handler_noexcept,
+# and ROTK's anti-cheat aborts with "Call from ... to unimplemented function
+# vcruntime140.dll.__C_specific_handler_noexcept, aborting".
+#
+# A fresh Proton prefix has no Microsoft runtime at all: these DLLs are Wine's
+# own builtin stand-ins, and msvcp140.dll's even carries a version resource
+# claiming 14.42, so a version check alone calls them current. The real
+# runtime must replace every one of them: a real msvcp140.dll next to a
+# builtin vcruntime140.dll is a broken combination.
+_DLLS = (
+    "concrt140",
+    "msvcp140",
+    "msvcp140_1",
+    "msvcp140_2",
+    "msvcp140_atomic_wait",
+    "msvcp140_codecvt_ids",
+    "vccorlib140",
+    "vcomp140",
+    "vcruntime140",
+)
+_X64_ONLY_DLLS = ("vcruntime140_1",)
+# The ones whose version is checked (a builtin vcruntime140.dll has none).
+_VERSIONED_DLLS = frozenset({"msvcp140", "vcruntime140"})
+_BUILTIN_MARKERS = (b"Wine builtin DLL", b"Wine placeholder DLL")
+_BUILTIN_MARKER_SPAN = 128  # the marker sits in the DOS header, at 0x40
+
 _CACHE_DIRECTORY_NAME = "VC-Redist"
 _VS_FIXEDFILEINFO_SIGNATURE = b"\xbd\x04\xef\xfe"
 _ACCEPTED_EXIT_CODES = frozenset({0, 3010})  # 3010: success, restart pending
@@ -38,6 +65,11 @@ class _Redistributable:
     sha256: str
     # The directory under <prefix>/drive_c/windows this build installs into.
     system_directory: str
+
+    @property
+    def dlls(self) -> tuple[str, ...]:
+        """The runtime DLLs this build provides, without the extension."""
+        return _DLLS + (_X64_ONLY_DLLS if self.architecture == "x64" else ())
 
 
 # Pinned, as winetricks does for its vcrun2022 verb (2025-07-14 x64,
@@ -77,23 +109,54 @@ def file_version(path: Path) -> tuple[int, int, int, int] | None:
     return (most >> 16, most & 0xFFFF, least >> 16, least & 0xFFFF)
 
 
-def _msvcp140(prefix: Path, redist: _Redistributable) -> Path:
+def is_wine_builtin(path: Path) -> bool:
+    """Whether the file is Wine's own stand-in and not a Microsoft binary.
+
+    Wine marks its builtin DLLs in the DOS header. Symlinks are followed, so
+    a link to a builtin counts as one.
+    """
+    try:
+        with path.open("rb") as stream:
+            head = stream.read(_BUILTIN_MARKER_SPAN)
+    except OSError:
+        return False
+    return any(marker in head for marker in _BUILTIN_MARKERS)
+
+
+def _dll_path(prefix: Path, redist: _Redistributable, name: str) -> Path:
     return (
         prefix
         / "drive_c"
         / "windows"
         / redist.system_directory
-        / "msvcp140.dll"
+        / f"{name}.dll"
     )
 
 
-def _is_outdated(prefix: Path, redist: _Redistributable) -> bool:
-    version = file_version(_msvcp140(prefix, redist))
-    return version is None or version[:2] < MINIMUM_VERSION
+def _problems(prefix: Path, redist: _Redistributable) -> list[str]:
+    """What is wrong with this build's DLLs in the prefix, one entry per file.
+
+    Empty when every one is a real Microsoft binary (and msvcp140.dll and
+    vcruntime140.dll are at least MINIMUM_VERSION).
+    """
+    problems = []
+    for name in redist.dlls:
+        path = _dll_path(prefix, redist, name)
+        label = f"{redist.system_directory}\\{name}.dll"
+        if not path.is_file():
+            problems.append(f"{label}: missing")
+        elif is_wine_builtin(path):
+            problems.append(f"{label}: Wine builtin")
+        elif name in _VERSIONED_DLLS:
+            version = file_version(path)
+            if version is None or version[:2] < MINIMUM_VERSION:
+                shown = ".".join(map(str, version)) if version else "none"
+                problems.append(f"{label}: version {shown}")
+    return problems
 
 
 def outdated_redistributables(prefix: Path) -> list[_Redistributable]:
-    return [r for r in _REDISTRIBUTABLES if _is_outdated(prefix, r)]
+    return [r for r in _REDISTRIBUTABLES if _problems(prefix, r)]
 
 
 def _sha256(path: Path) -> str:
@@ -160,15 +223,18 @@ def ensure_current(
     session: CompatSession | None = None,
 ) -> None:
     """Installs Microsoft's Visual C++ runtime into the prefix (the game's, or
-    the one of `session`), but only if its msvcp140.dll is missing or older
-    than MINIMUM_VERSION.
+    the one of `session`), unless every runtime DLL in it is already a real
+    Microsoft file (and msvcp140.dll and vcruntime140.dll are at least
+    MINIMUM_VERSION).
 
+    A new Proton prefix only has Wine's builtin stand-ins, which claim to be
+    14.42 and so must be told apart from the real thing by their marker.
     Runs Microsoft's own installer inside the prefix, the same thing
     `winetricks vcrun2022` does (without its manual msvcp140.dll extraction,
-    which isn't needed when the existing file is an older native one). If the
-    plain install leaves a file old, which happens when the bundle is already
-    registered but its files were replaced behind its back, a repair pass
-    follows. Cheap when nothing is needed: two file reads.
+    which isn't needed: it replaces the builtins, as it does an older native
+    file). If the plain install leaves a file wrong, which happens when the
+    bundle is already registered but its files were replaced behind its back,
+    a repair pass follows. Cheap when nothing is needed: a few file reads.
     """
     for mode in ("/install", "/repair"):
         stale = outdated_redistributables(prefix)
@@ -177,24 +243,24 @@ def ensure_current(
         for redist in stale:
             installer = _cached_installer(redist)
             logger.warning(
-                "Updating the %s Visual C++ runtime in the prefix (%s, found"
-                " %s)...",
+                "Updating the %s Visual C++ runtime in the prefix (%s): %s...",
                 redist.architecture,
                 mode,
-                file_version(_msvcp140(prefix, redist)) or "none",
+                "; ".join(_problems(prefix, redist)[:3]),
             )
             _run_installer(steam, game_id, redist, installer, mode, session)
-    remaining = outdated_redistributables(prefix)
+    remaining = [
+        problem
+        for redist in _REDISTRIBUTABLES
+        for problem in _problems(prefix, redist)
+    ]
     if remaining:
-        details = ", ".join(
-            f"{r.system_directory}: "
-            f"{file_version(_msvcp140(prefix, r)) or 'missing'}"
-            for r in remaining
-        )
         msg = (
-            "The Visual C++ runtime in the prefix is still older than"
-            f" {'.'.join(map(str, MINIMUM_VERSION))} after installing"
-            f" ({details}). ROTK's anti-cheat needs a newer msvcp140.dll."
+            "The Visual C++ runtime in the prefix is still not Microsoft's"
+            f" after installing ({'; '.join(remaining)}). ROTK's anti-cheat"
+            " needs the real msvcp140.dll, version"
+            f" {'.'.join(map(str, MINIMUM_VERSION))} or newer, not Wine's"
+            " builtin one. The installer needs a graphical session to run,"
+            " even though it is silent."
         )
         raise RuntimeError(msg)
-    logger.debug("Visual C++ runtime is current.")

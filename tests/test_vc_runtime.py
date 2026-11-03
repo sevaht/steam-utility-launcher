@@ -26,11 +26,43 @@ def _dll_bytes(major: int, minor: int, build: int = 0, rev: int = 0) -> bytes:
     return b"MZ" + bytes(64) + info + bytes(32)
 
 
+def _builtin_bytes(major: int, minor: int) -> bytes:
+    """What Wine ships: a marker in the DOS header, and a version resource
+    that claims to be a real runtime."""
+    info = _dll_bytes(major, minor)[2 + 64 :]
+    return b"MZ" + bytes(62) + b"Wine builtin DLL" + bytes(32) + info
+
+
+def _names(directory: str) -> list[str]:
+    redist = next(
+        r
+        for r in vc_runtime._REDISTRIBUTABLES
+        if r.system_directory == directory
+    )
+    return list(redist.dlls)
+
+
+def _dll(prefix: Path, directory: str, name: str) -> Path:
+    return prefix / "drive_c" / "windows" / directory / f"{name}.dll"
+
+
 def _write_dll(prefix: Path, directory: str, version: tuple[int, int]) -> Path:
-    path = prefix / "drive_c" / "windows" / directory / "msvcp140.dll"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_dll_bytes(*version))
-    return path
+    """Every runtime DLL of that directory, as real Microsoft files."""
+    for name in _names(directory):
+        path = _dll(prefix, directory, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_dll_bytes(*version))
+    return _dll(prefix, directory, "msvcp140")
+
+
+def _write_builtin_dll(
+    prefix: Path, directory: str, version: tuple[int, int] = (14, 42)
+) -> None:
+    """Every runtime DLL of that directory, as Wine's builtin stand-ins."""
+    for name in _names(directory):
+        path = _dll(prefix, directory, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_builtin_bytes(*version))
 
 
 def test_file_version_reads_the_version_resource(tmp_path: Path) -> None:
@@ -68,6 +100,81 @@ def test_missing_runtime_counts_as_outdated(tmp_path: Path) -> None:
     _write_dll(tmp_path, "system32", (14, 44))
     stale = vc_runtime.outdated_redistributables(tmp_path)
     assert [r.architecture for r in stale] == ["x86"]
+
+
+def test_wine_builtins_that_claim_a_current_version_are_not_current(
+    tmp_path: Path,
+) -> None:
+    # A fresh Proton prefix: msvcp140.dll says 14.42, but it is Wine's.
+    _write_builtin_dll(tmp_path, "system32")
+    _write_builtin_dll(tmp_path, "syswow64")
+    assert vc_runtime.file_version(_dll(tmp_path, "system32", "msvcp140")) == (
+        14,
+        42,
+        0,
+        0,
+    )
+    stale = vc_runtime.outdated_redistributables(tmp_path)
+    assert [r.architecture for r in stale] == ["x64", "x86"]
+    problems = vc_runtime._problems(tmp_path, stale[0])
+    assert r"system32\msvcp140.dll: Wine builtin" in problems
+    assert len(problems) == len(stale[0].dlls)
+
+
+def test_one_builtin_among_real_files_is_enough_to_be_stale(
+    tmp_path: Path,
+) -> None:
+    _write_dll(tmp_path, "system32", (14, 44))
+    _write_dll(tmp_path, "syswow64", (14, 44))
+    assert not vc_runtime.outdated_redistributables(tmp_path)
+    _dll(tmp_path, "system32", "vcruntime140").write_bytes(
+        _builtin_bytes(14, 44)
+    )
+    stale = vc_runtime.outdated_redistributables(tmp_path)
+    assert [r.architecture for r in stale] == ["x64"]
+    assert vc_runtime._problems(tmp_path, stale[0]) == [
+        r"system32\vcruntime140.dll: Wine builtin"
+    ]
+
+
+def test_a_missing_dll_of_the_set_is_stale(tmp_path: Path) -> None:
+    _write_dll(tmp_path, "system32", (14, 44))
+    _write_dll(tmp_path, "syswow64", (14, 44))
+    _dll(tmp_path, "syswow64", "vcomp140").unlink()
+    [stale] = vc_runtime.outdated_redistributables(tmp_path)
+    assert vc_runtime._problems(tmp_path, stale) == [
+        r"syswow64\vcomp140.dll: missing"
+    ]
+
+
+def test_only_the_x64_runtime_has_vcruntime140_1(tmp_path: Path) -> None:
+    _write_dll(tmp_path, "system32", (14, 44))
+    _write_dll(tmp_path, "syswow64", (14, 44))
+    assert _dll(tmp_path, "system32", "vcruntime140_1").exists()
+    assert not _dll(tmp_path, "syswow64", "vcruntime140_1").exists()
+    assert not vc_runtime.outdated_redistributables(tmp_path)
+
+
+def test_a_link_to_a_builtin_is_a_builtin_and_a_link_to_a_real_file_is_not(
+    tmp_path: Path,
+) -> None:
+    builtin = tmp_path / "builtin.dll"
+    builtin.write_bytes(_builtin_bytes(14, 44))
+    real = tmp_path / "real.dll"
+    real.write_bytes(_dll_bytes(14, 44))
+    to_builtin = tmp_path / "to_builtin.dll"
+    to_builtin.symlink_to(builtin)
+    to_real = tmp_path / "to_real.dll"
+    to_real.symlink_to(real)
+    assert vc_runtime.is_wine_builtin(to_builtin)
+    assert not vc_runtime.is_wine_builtin(to_real)
+    assert not vc_runtime.is_wine_builtin(tmp_path / "missing.dll")
+
+
+def test_wine_placeholder_files_count_as_builtins(tmp_path: Path) -> None:
+    placeholder = tmp_path / "x.dll"
+    placeholder.write_bytes(b"MZ" + bytes(62) + b"Wine placeholder DLL")
+    assert vc_runtime.is_wine_builtin(placeholder)
 
 
 def test_pinned_hashes_look_like_sha256() -> None:
@@ -222,6 +329,25 @@ def test_http_error_is_reported(
 
 
 @pytest.mark.usefixtures("cache")
+def test_the_installer_replaces_wines_builtins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prefix = tmp_path / "pfx"
+    _write_builtin_dll(prefix, "system32")
+    _write_builtin_dll(prefix, "syswow64")
+    _pin(monkeypatch, {"x64": b"x64-installer", "x86": b"x86-installer"})
+
+    def run(command: list[str]) -> int:
+        directory = "system32" if "x64" in command[0] else "syswow64"
+        _write_dll(prefix, directory, (14, 44))
+        return 0
+
+    steam = _FakeSteam(run)
+    vc_runtime.ensure_current(steam=steam, prefix=prefix, game_id="433850")  # type: ignore[arg-type]
+    assert [c[1] for c in steam.commands] == ["/install", "/install"]
+    assert not vc_runtime.outdated_redistributables(prefix)
+
+
 @pytest.mark.usefixtures("cache")
 def test_repair_pass_fixes_a_registered_but_old_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -249,5 +375,21 @@ def test_fails_loudly_if_the_installer_did_not_update_it(
     _write_dll(prefix, "syswow64", (14, 44))
     _pin(monkeypatch, {"x64": b"x64-installer", "x86": b"x86-installer"})
     steam = _FakeSteam(lambda _: 1)  # installer "runs" but changes nothing
-    with pytest.raises(RuntimeError, match=r"still older than 14\.40"):
+    with pytest.raises(RuntimeError, match=r"still not Microsoft's") as error:
         vc_runtime.ensure_current(steam=steam, prefix=prefix, game_id="433850")  # type: ignore[arg-type]
+    assert r"system32\msvcp140.dll: version 14.0.0.0" in str(error.value)
+    assert "graphical session" in str(error.value)
+
+
+@pytest.mark.usefixtures("cache")
+def test_it_fails_loudly_if_builtins_are_still_there_afterwards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prefix = tmp_path / "pfx"
+    _write_builtin_dll(prefix, "system32")
+    _write_dll(prefix, "syswow64", (14, 44))
+    _pin(monkeypatch, {"x64": b"x64-installer", "x86": b"x86-installer"})
+    steam = _FakeSteam(lambda _: 2)  # a silent installer without a display
+    with pytest.raises(RuntimeError, match="Wine builtin") as error:
+        vc_runtime.ensure_current(steam=steam, prefix=prefix, game_id="433850")  # type: ignore[arg-type]
+    assert r"system32\vcruntime140_1.dll: Wine builtin" in str(error.value)

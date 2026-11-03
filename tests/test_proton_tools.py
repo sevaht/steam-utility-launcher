@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 import json
 import logging
+import runpy
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -275,6 +277,266 @@ def test_an_update_replaces_the_old_install(
     assert (
         tools / SVT_TOOL / proton_tools.TAG_FILE_NAME
     ).read_text() == new_tag
+
+
+def _update_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old: Path
+) -> Path:
+    archive, checksum = _packed(tmp_path, SVT_TOOL, "GE-Proton11-12")
+    _serve(
+        monkeypatch,
+        proton_tools.SVT_GE_PROTON,
+        "svt-GE-Proton11-12",
+        archive,
+        checksum,
+    )
+    proton_tools.install(_steam(old.parent), proton_tools.SVT_GE_PROTON)
+    return old.parent / SVT_TOOL
+
+
+def test_an_update_keeps_the_users_proton_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _build_tool(
+        tmp_path / "tools", SVT_TOOL, "GE-Proton11-11", marker=SVT_TAG
+    )
+    settings = '{"user_settings": {"PROTON_ENABLE_WAYLAND": "1"}}\n'
+    (old / "user_settings.py").write_text(settings)
+    (old / "user_settings.sample.py").write_text("# not the user's")
+
+    new = _update_over(tmp_path, monkeypatch, old)
+    assert (new / "user_settings.py").read_text() == settings
+    assert (new / proton_tools.TAG_FILE_NAME).read_text() == (
+        "svt-GE-Proton11-12"
+    )
+    # Only that file: the rest is the new release's
+    assert not (new / "user_settings.sample.py").exists()
+
+
+def test_a_linked_settings_file_stays_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _build_tool(
+        tmp_path / "tools", SVT_TOOL, "GE-Proton11-11", marker=SVT_TAG
+    )
+    elsewhere = tmp_path / "my_settings.py"
+    elsewhere.write_text("user_settings = {}\n")
+    (old / "user_settings.py").symlink_to(elsewhere)
+
+    new = _update_over(tmp_path, monkeypatch, old)
+    assert (new / "user_settings.py").is_symlink()
+    assert (new / "user_settings.py").resolve() == elsewhere.resolve()
+
+
+def _settings_of(
+    path: Path, monkeypatch: pytest.MonkeyPatch, *, display: str | None
+) -> dict[str, str]:
+    """What Proton would get from the file, started in such a session."""
+    if display is None:
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    else:
+        monkeypatch.setenv("WAYLAND_DISPLAY", display)
+    settings = runpy.run_path(str(path))["user_settings"]
+    assert isinstance(settings, dict)
+    return settings
+
+
+def test_svt_ge_makes_default_settings_that_follow_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, checksum = _packed(tmp_path, SVT_TOOL, "GE-Proton11-11")
+    _serve(monkeypatch, proton_tools.SVT_GE_PROTON, SVT_TAG, archive, checksum)
+    tools = tmp_path / "tools"
+    proton_tools.install(_steam(tools), proton_tools.SVT_GE_PROTON)
+
+    made = tools / SVT_TOOL / "user_settings.py"
+    # Decided when Proton starts, not when this was installed
+    assert _settings_of(made, monkeypatch, display="wayland-0") == {
+        "PROTON_ENABLE_WAYLAND": "1"
+    }
+    assert _settings_of(made, monkeypatch, display=None) == {}
+    assert _settings_of(made, monkeypatch, display="") == {}
+
+
+def test_an_update_without_settings_makes_the_default_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _build_tool(
+        tmp_path / "tools", SVT_TOOL, "GE-Proton11-11", marker=SVT_TAG
+    )
+    new = _update_over(tmp_path, monkeypatch, old)
+    assert _settings_of(
+        new / "user_settings.py", monkeypatch, display="wayland-1"
+    ) == {"PROTON_ENABLE_WAYLAND": "1"}
+
+
+def test_a_new_series_takes_the_settings_of_the_previous_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools = tmp_path / "tools"
+    previous = _build_tool(tools, "SVT-GE-Proton-10", "GE-Proton10-9")
+    (previous / "user_settings.py").write_text("user_settings = {'A': '1'}\n")
+    archive, checksum = _packed(tmp_path, SVT_TOOL, "GE-Proton11-11")
+    _serve(monkeypatch, proton_tools.SVT_GE_PROTON, SVT_TAG, archive, checksum)
+    proton_tools.install(_steam(tools), proton_tools.SVT_GE_PROTON)
+    assert (tools / SVT_TOOL / "user_settings.py").read_text() == (
+        "user_settings = {'A': '1'}\n"
+    )
+
+
+def test_ge_takes_the_settings_of_the_newest_previous_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools = tmp_path / "tools"
+    # By number: 10-3 is newer than 9-20, which text order would put last
+    for name, version, content in (
+        ("GE-Proton9-20-x86_64", "GE-Proton9-20", "'nine'"),
+        ("GE-Proton10-3-x86_64", "GE-Proton10-3", "'ten'"),
+        ("GE-Proton10-2-x86_64", "GE-Proton10-2", None),
+    ):
+        tool = _build_tool(tools, name, version)
+        if content:
+            (tool / "user_settings.py").write_text(f"x = {content}\n")
+    archive, checksum = _packed(tmp_path, GE_TOOL, GE_TAG)
+    _serve(monkeypatch, proton_tools.GE_PROTON, GE_TAG, archive, checksum)
+    proton_tools.install(_steam(tools), proton_tools.GE_PROTON)
+    assert (tools / GE_TOOL / "user_settings.py").read_text() == "x = 'ten'\n"
+
+
+def test_ge_makes_no_settings_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, checksum = _packed(tmp_path, GE_TOOL, GE_TAG)
+    _serve(monkeypatch, proton_tools.GE_PROTON, GE_TAG, archive, checksum)
+    tools = tmp_path / "tools"
+    proton_tools.install(_steam(tools), proton_tools.GE_PROTON)
+    assert not (tools / GE_TOOL / "user_settings.py").exists()
+
+
+def test_settings_are_not_taken_from_another_proton(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools = tmp_path / "tools"
+    other = _build_tool(tools, "proton_experimental", "x")
+    (other / "user_settings.py").write_text("user_settings = {'B': '2'}\n")
+    archive, checksum = _packed(tmp_path, GE_TOOL, GE_TAG)
+    _serve(monkeypatch, proton_tools.GE_PROTON, GE_TAG, archive, checksum)
+    proton_tools.install(_steam(tools), proton_tools.GE_PROTON)
+    assert not (tools / GE_TOOL / "user_settings.py").exists()
+
+
+# The hash of every version of the settings file SVT-GE-Proton has generated.
+# Changing one in place would make a file this tool made look edited (and so
+# never updated): add the new version at the end of
+# proton_tools._SVT_USER_SETTINGS_VERSIONS, and its hash here.
+_PINNED_SVT_SETTINGS = (
+    "a753ca46f4d04f2aba24c1a881c29935313901e1dd9e9b7de53db1d12e0db92b",
+)
+
+
+def test_the_generated_settings_versions_are_pinned() -> None:
+    source = proton_tools.SVT_GE_PROTON
+    versions = source.user_settings_versions
+    assert (
+        tuple(hashlib.sha256(v.encode()).hexdigest() for v in versions)
+        == _PINNED_SVT_SETTINGS
+    )
+    assert source.default_user_settings == versions[-1]
+    assert proton_tools.GE_PROTON.default_user_settings == ""
+
+
+OLD_SETTINGS = "# an older generated file\nuser_settings = {}\n"
+NEW_SETTINGS = "# a newer generated file\nuser_settings = {'X': '1'}\n"
+
+
+def _two_versions() -> proton_tools.ProtonSource:
+    return dataclasses.replace(
+        proton_tools.SVT_GE_PROTON,
+        user_settings_versions=(OLD_SETTINGS, NEW_SETTINGS),
+    )
+
+
+def _install_new_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings: str | None
+) -> Path:
+    """SVT-GE-Proton-11 (release 11-11, with `settings` in it) is updated to
+    release 11-12, with a source that has two versions of the file."""
+    tools = tmp_path / "tools"
+    old = _build_tool(tools, SVT_TOOL, "GE-Proton11-11", marker=SVT_TAG)
+    if settings is not None:
+        (old / "user_settings.py").write_text(settings)
+    source = _two_versions()
+    archive, checksum = _packed(tmp_path, SVT_TOOL, "GE-Proton11-12")
+    _serve(monkeypatch, source, "svt-GE-Proton11-12", archive, checksum)
+    proton_tools.install(_steam(tools), source)
+    return tools / SVT_TOOL / "user_settings.py"
+
+
+def test_an_untouched_older_generated_file_is_brought_up_to_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _install_new_release(tmp_path, monkeypatch, OLD_SETTINGS)
+    assert result.read_text() == NEW_SETTINGS
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        OLD_SETTINGS + "# my change\n",  # an older one, edited
+        OLD_SETTINGS.replace("older", "OLDER"),
+        NEW_SETTINGS,  # already current
+        "user_settings = {'MINE': '1'}\n",  # the user's own
+    ],
+)
+def test_a_file_that_is_not_exactly_an_older_version_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str
+) -> None:
+    result = _install_new_release(tmp_path, monkeypatch, content)
+    assert result.read_text() == content
+
+
+def test_a_linked_older_file_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools = tmp_path / "tools"
+    old = _build_tool(tools, SVT_TOOL, "GE-Proton11-11", marker=SVT_TAG)
+    mine = tmp_path / "mine.py"
+    mine.write_text(OLD_SETTINGS)
+    (old / "user_settings.py").symlink_to(mine)
+    source = _two_versions()
+    archive, checksum = _packed(tmp_path, SVT_TOOL, "GE-Proton11-12")
+    _serve(monkeypatch, source, "svt-GE-Proton11-12", archive, checksum)
+    proton_tools.install(_steam(tools), source)
+    assert (tools / SVT_TOOL / "user_settings.py").is_symlink()
+    assert mine.read_text() == OLD_SETTINGS
+
+
+def test_it_is_brought_up_to_date_even_when_the_tool_is_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools = tmp_path / "tools"
+    tool = _build_tool(tools, SVT_TOOL, "GE-Proton11-11", marker=SVT_TAG)
+    (tool / "user_settings.py").write_text(OLD_SETTINGS)
+    source = _two_versions()
+    archive, checksum = _packed(tmp_path, SVT_TOOL, "GE-Proton11-11")
+    downloads = _serve(monkeypatch, source, SVT_TAG, archive, checksum)
+
+    assert not proton_tools.install(_steam(tools), source)
+    assert downloads == []
+    assert (tool / "user_settings.py").read_text() == NEW_SETTINGS
+
+
+def test_a_current_tool_without_settings_gets_none_made(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Nobody asked for it: it may have been deleted on purpose
+    tools = tmp_path / "tools"
+    tool = _build_tool(tools, SVT_TOOL, "GE-Proton11-11", marker=SVT_TAG)
+    source = _two_versions()
+    archive, checksum = _packed(tmp_path, SVT_TOOL, "GE-Proton11-11")
+    _serve(monkeypatch, source, SVT_TAG, archive, checksum)
+    assert not proton_tools.install(_steam(tools), source)
+    assert not (tool / "user_settings.py").exists()
 
 
 def test_a_bad_checksum_leaves_the_installed_tool_alone(

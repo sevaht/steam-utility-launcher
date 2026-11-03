@@ -287,7 +287,23 @@ steam-utility-launcher proton svt-ge
 
 then restart Steam so it lists **SVT-GE-Proton-11**. The download is checked
 against the release's `.sha512sum`, and an update replaces the installed tool
-(`--force` installs even when it is current). The same command installs
+(`--force` installs even when it is current).
+
+Every Proton installed with `proton` keeps your `user_settings.py`, Proton's own
+place for per-tool environment defaults, which apply to every game run with that
+Proton unless the game's launch options or Steam's environment already set the
+variable. An update keeps the one in the folder it replaces, and a new install
+(the next GE release, or the next SVT-GE-Proton series) takes the one of the
+newest other tool of the same kind. `svt-ge` also makes one, if there is none to
+take over: it sets `PROTON_ENABLE_WAYLAND=1` only when Proton starts in a Wayland
+session (it checks for `WAYLAND_DISPLAY` each time, so it follows the session you
+are in and not the one it was made in). After that the file is yours: edit it
+freely. If a later version of this tool changes the default, a file that is
+exactly an older default (you never changed it) is brought up to date the next
+time you run `proton svt-ge`, even when the tool itself is current; a file with
+any change in it, or a link, is never touched.
+
+The same command installs
 upstream GE-Proton (`proton ge`; `--tag GE-Proton10-4` picks a release, and
 each one is a tool of its own), and `proton` on its own lists them. Doing it by
 hand works too: unpack a release's `.tar.gz` into
@@ -305,19 +321,37 @@ ROTK's anti-cheat module is built with a recent MSVC and needs a recent
 dereferences a null pointer when locking one, so the game died about three
 seconds after the module loaded. 14.40 is the first release that handles it.
 
-Before every launch, `rotk-launcher` reads the version of the prefix's
-`msvcp140.dll` (both `system32` and `syswow64`, two file reads, no network). If
-either is older than 14.40 it installs Microsoft's Visual C++ runtime into the
-prefix, the same thing `winetricks vcrun2022` does, so neither winetricks nor
+Without the real runtime the game dies a few minutes into a match: Wine's builtin
+`vcruntime140.dll` only has a stub for `__C_specific_handler_noexcept` (which
+code built with a recent MSVC calls when an exception crosses a `noexcept`
+function), so ROTK's anti-cheat aborts with `Call from ... to unimplemented
+function vcruntime140.dll.__C_specific_handler_noexcept, aborting`, which looks
+like a disconnect.
+
+A new Proton prefix has no Microsoft runtime at all: its `msvcp140.dll`,
+`vcruntime140.dll` and the rest are Wine's own builtin stand-ins, and the
+builtin `msvcp140.dll` even carries a version resource claiming 14.42. So the
+version alone says nothing; the builtins are recognised by the marker Wine puts
+in them.
+
+Before every launch, `rotk-launcher` checks the runtime DLLs in the prefix (both
+`system32` and `syswow64`: `msvcp140` and its `_1`, `_2`, `_atomic_wait` and
+`_codecvt_ids` variants, `vcruntime140` (and `_1` on x64), `concrt140`,
+`vccorlib140` and `vcomp140`; a few file reads, no network). If any of them is
+missing, is still Wine's builtin, or (for `msvcp140.dll` and `vcruntime140.dll`)
+is older than 14.40, it installs Microsoft's Visual C++ runtime into the prefix,
+the same thing `winetricks vcrun2022` does, so neither winetricks nor
 protontricks is needed. The installers (`vc_redist.x64.exe` and `.x86.exe`) are
 downloaded once from Microsoft, checked against pinned SHA-256 hashes, and kept
 in `~/.local/share/steam-utility-launcher/VC-Redist/`; a download that doesn't
 match is never run. They are run silently (`/install`, then `/repair` if a file
-is still old, which happens when the bundle is registered but its files were
-replaced). After installing, the version is checked again and the launch stops
-with an error if it is still old. `aka.ms` serves whatever Microsoft currently
-publishes, so when Microsoft updates it the pinned hashes stop matching; update
-them in `vc_runtime.py`.
+is still wrong, which happens when the bundle is registered but its files were
+replaced). They replace the builtins with Microsoft's files. Even silent, they
+need a graphical session (they create a hidden window and exit with status 2
+without one). After installing, the DLLs are checked again and the launch stops
+with an error naming each file that is still wrong. `aka.ms` serves whatever
+Microsoft currently publishes, so when Microsoft updates it the pinned hashes
+stop matching; update them in `vc_runtime.py`.
 
 #### `enable-hwid-access`
 
