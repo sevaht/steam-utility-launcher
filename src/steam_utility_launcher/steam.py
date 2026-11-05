@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import KeysView, Mapping, Sequence
+from collections.abc import Callable, KeysView, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -488,6 +488,45 @@ class SteamLocation:
                 raise SteamError(msg)
             time.sleep(_SHUTDOWN_POLL_SECONDS)
 
+    def close_client_for_change(
+        self, ask: Callable[[str], str], *, assume_yes: bool, why: str
+    ) -> bool:
+        """Gets Steam out of the way of a change to its files, if it is running
+        (Steam saves its settings when it exits, which would undo the change).
+        It is closed after asking, unless `assume_yes`. Returns whether it was
+        closed."""
+        if not self.is_client_running():
+            return False
+        if not assume_yes:
+            try:
+                answer = ask(
+                    f"Steam has to be closed to {why} (it saves its settings"
+                    " when it exits, which would undo the change). Close"
+                    " Steam now? [y/N] "
+                )
+            except EOFError:
+                answer = ""
+            if answer.strip().lower() not in {"y", "yes"}:
+                msg = f"Close Steam, then run this again to {why}."
+                raise SteamError(msg)
+        self.shut_down_client()
+        return True
+
+    def start_client(self) -> None:
+        """Starts Steam, which runs on its own, not as a child of this
+        program."""
+        try:
+            subprocess.Popen(  # noqa: S603
+                [self.client_program()],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as error:
+            msg = f"Could not start Steam: {error}"
+            raise SteamError(msg) from error
+
     def launch_game(self, app_id: int) -> None:
         """Has Steam start the non-Steam game, starting Steam first if it
         isn't running (the game then starts once it is up). Steam runs on its
@@ -505,9 +544,9 @@ class SteamLocation:
             msg = f"Could not start the game through Steam: {error}"
             raise SteamError(msg) from error
 
-    def account_directory(self) -> Path:
-        """`userdata/<account>` of the Steam account in use: the one that last
-        signed in (or the only one there is)."""
+    def account_steam_id(self) -> int:
+        """The 64 bit Steam id of the account in use: the one that last signed
+        in (or the only one there is)."""
         try:
             users = vdf.load(
                 (self.root / "config" / "loginusers.vdf").open(
@@ -528,11 +567,15 @@ class SteamLocation:
         candidates = recent or list(users)
         if len(candidates) != 1:
             msg = (
-                "Could not tell which Steam account to add the shortcut to;"
-                " sign in to the one you want in Steam, then try again."
+                "Could not tell which Steam account is in use; sign in to the"
+                " one you want in Steam, then try again."
             )
             raise SteamError(msg)
-        account = int(candidates[0]) - _STEAM_ID64_BASE
+        return int(candidates[0])
+
+    def account_directory(self) -> Path:
+        """`userdata/<account>` of the Steam account in use."""
+        account = self.account_steam_id() - _STEAM_ID64_BASE
         return self.root / "userdata" / str(account)
 
     @property

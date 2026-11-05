@@ -88,3 +88,145 @@ def test_a_game_that_cannot_be_started_is_an_error(
 def test_an_unreadable_account_list_is_an_error(tmp_path: Path) -> None:
     with pytest.raises(SteamError, match="Could not read Steam's accounts"):
         _location(tmp_path).account_directory()
+
+
+def _accounts(root: Path, users: str) -> SteamLocation:
+    config = root / "config"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "loginusers.vdf").write_text(
+        f'"users"\n{{\n{users}}}\n', encoding="utf-8"
+    )
+    return _location(root)
+
+
+def _user(steam_id: int, *, recent: bool) -> str:
+    return (
+        f'\t"{steam_id}"\n\t{{\n\t\t"AccountName"\t\t"someone"\n'
+        f'\t\t"MostRecent"\t\t"{int(recent)}"\n\t}}\n'
+    )
+
+
+def test_the_account_in_use_is_the_one_that_last_signed_in(
+    tmp_path: Path,
+) -> None:
+    location = _accounts(
+        tmp_path,
+        _user(76561197960265729, recent=False)
+        + _user(76561197969290206, recent=True),
+    )
+    assert location.account_steam_id() == 76561197969290206
+    assert location.account_directory() == tmp_path / "userdata" / "9024478"
+
+
+def test_the_only_account_is_the_one_in_use(tmp_path: Path) -> None:
+    location = _accounts(tmp_path, _user(76561197969290206, recent=False))
+    assert location.account_steam_id() == 76561197969290206
+
+
+def test_accounts_with_no_clear_one_in_use_are_an_error(
+    tmp_path: Path,
+) -> None:
+    location = _accounts(
+        tmp_path,
+        _user(76561197960265729, recent=False)
+        + _user(76561197969290206, recent=False),
+    )
+    with pytest.raises(SteamError, match="which Steam account"):
+        location.account_steam_id()
+
+
+def test_steam_is_closed_for_a_change_after_asking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    closed: list[bool] = []
+    monkeypatch.setattr(
+        SteamLocation, "is_client_running", staticmethod(lambda: True)
+    )
+    monkeypatch.setattr(
+        SteamLocation, "shut_down_client", lambda _self: closed.append(True)
+    )
+    prompts: list[str] = []
+
+    def ask(prompt: str) -> str:
+        prompts.append(prompt)
+        return " Yes "
+
+    assert _location(tmp_path).close_client_for_change(
+        ask, assume_yes=False, why="do a thing"
+    )
+    assert closed == [True]
+    assert "do a thing" in prompts[0]
+
+
+def test_a_steam_that_is_not_running_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        SteamLocation, "is_client_running", staticmethod(lambda: False)
+    )
+
+    def never(_prompt: str) -> str:
+        pytest.fail("nothing to ask about")
+
+    assert not _location(tmp_path).close_client_for_change(
+        never, assume_yes=False, why="x"
+    )
+
+
+@pytest.mark.parametrize("answer", ["n", "", "maybe"])
+def test_steam_is_not_closed_if_the_answer_is_not_yes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, answer: str
+) -> None:
+    def must_not_close(_self: object) -> None:
+        pytest.fail("it should not have been closed")
+
+    monkeypatch.setattr(
+        SteamLocation, "is_client_running", staticmethod(lambda: True)
+    )
+    monkeypatch.setattr(SteamLocation, "shut_down_client", must_not_close)
+    with pytest.raises(SteamError, match="Close Steam, then run this again"):
+        _location(tmp_path).close_client_for_change(
+            lambda _p: answer, assume_yes=False, why="x"
+        )
+
+
+def test_no_answer_at_all_is_a_no(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        SteamLocation, "is_client_running", staticmethod(lambda: True)
+    )
+
+    def eof(_prompt: str) -> str:
+        raise EOFError
+
+    with pytest.raises(SteamError, match="Close Steam"):
+        _location(tmp_path).close_client_for_change(
+            eof, assume_yes=False, why="x"
+        )
+
+
+def test_steam_is_started_on_its_own(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    started: list[tuple[list[str], bool]] = []
+
+    def popen(command: list[str], **options: object) -> None:
+        started.append((command, bool(options["start_new_session"])))
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/steam")
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    _location(tmp_path).start_client()
+    assert started == [(["/usr/bin/steam"], True)]
+
+
+def test_steam_that_cannot_be_started_is_an_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fail(*_a: object, **_k: object) -> None:
+        msg = "no such program"
+        raise OSError(msg)
+
+    monkeypatch.setattr(subprocess, "Popen", fail)
+    with pytest.raises(SteamError, match="Could not start Steam"):
+        _location(tmp_path).start_client()

@@ -1,0 +1,73 @@
+# Dark Souls II: Scholar of the First Sin controls, as `ds2-bindings` sets
+# them. Every action in the game's keyboard and mouse tables is listed, by name.
+#
+# An action is set to a key (or mouse button) by name, or by number, which is
+# the code the game stores. Codes that are not keys, or that have no name here,
+# show up as numbers, and are best left as they are. To hold a modifier (Shift
+# or Ctrl) with one, give a table:
+#   toggle_menu_left = { key = "Left", modifier = "Shift" }
+#   jump = { button = "Click mouse wheel", modifier = "Shift" }
+# `ds2-bindings --show` prints a save's controls in this same format.
+#
+# This is one particular scheme: the keyboard side matches a Steam Input layout
+# that sends these keys from a gamepad, with Toggle menu on C and V and
+# Function 1 and 2 on P and B (the game's defaults are Shift+Left/Right, E and
+# N). The mouse side is the game's own defaults.
+
+[keyboard]
+switch_spells = "Up"
+switch_items = "Down"
+switch_left_weapon = "Left"
+switch_right_weapon = "Right"
+open_start_menu = "Esc"
+open_gesture_menu = "T"
+attack_left_hand = "U"
+attack_right_hand = "H"
+strong_attack_left_hand = "Y"
+strong_attack_right_hand = "G"
+jump = "F"
+reset_camera = "O"
+interact = "Enter"
+dash_backstep_roll = "Space"
+use_item = "E"
+wield_right_weapon_two_handed = "N"
+confirm = "Enter"
+cancel = "Backspace"
+tilt_camera_up = "I"
+tilt_camera_down = "K"
+tilt_camera_left = "J"
+tilt_camera_right = "L"
+run_forward = "W"
+run_backward = "S"
+run_left = "A"
+run_right = "D"
+auto_dash = "X"
+auto_walk = "Z"
+lock_guard = "M"
+move_cursor_up = "Up"
+move_cursor_down = "Down"
+move_cursor_left = "Left"
+move_cursor_right = "Right"
+toggle_menu_left = "C"
+toggle_menu_right = "V"
+function_1 = "P"
+function_2 = "B"
+walk = "LAlt"
+
+[mouse]
+switch_spells = "Mouse wheel up"
+switch_items = "Mouse wheel down"
+switch_left_weapon = { button = "Left click", modifier = "Ctrl" }
+switch_right_weapon = { button = "Right click", modifier = "Ctrl" }
+open_start_menu = "Nothing"
+open_gesture_menu = "Nothing"
+attack_left_hand = "Left click"
+attack_right_hand = "Right click"
+strong_attack_left_hand = "Double left click"
+strong_attack_right_hand = "Double right click"
+jump = { button = "Click mouse wheel", modifier = "Shift" }
+reset_camera = "Click mouse wheel"
+interact = { button = "Left click", modifier = "Shift" }
+dash_backstep_roll = "Nothing"
+use_item = { button = "Right click", modifier = "Shift" }
+wield_right_weapon_two_handed = { button = "Click mouse wheel", modifier = "Ctrl" }

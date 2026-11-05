@@ -268,37 +268,6 @@ def with_options(
     return shlex.join([*tokens[: span[0]], *options, *tokens[span[1] :]])
 
 
-def _ask_to_close_steam(
-    ask: Callable[[str], str], *, assume_yes: bool, why: str
-) -> bool:
-    if assume_yes:
-        return True
-    try:
-        answer = ask(
-            f"Steam has to be closed to {why} (it saves its library when it"
-            " exits, which would undo the change). Close Steam now? [y/N] "
-        )
-    except EOFError:
-        return False
-    return answer.strip().lower() in {"y", "yes"}
-
-
-def _close_steam_for_change(
-    location: SteamLocation,
-    ask: Callable[[str], str],
-    *,
-    assume_yes: bool,
-    why: str,
-) -> None:
-    """Gets Steam out of the way of a change to its files, if it is running."""
-    if not location.is_client_running():
-        return
-    if not _ask_to_close_steam(ask, assume_yes=assume_yes, why=why):
-        msg = f"Close Steam, then run this again to {why}."
-        raise ShortcutError(msg)
-    location.shut_down_client()
-
-
 def _svt_tool_name(steam: Steam) -> str:
     # By number, so that SVT-GE-Proton-11 is newer than SVT-GE-Proton-9.
     names = sorted(
@@ -372,8 +341,8 @@ def ensure_shortcut(  # noqa: PLR0913
             )
         else:
             tool_name = _svt_tool_name(steam)
-            _close_steam_for_change(
-                location, ask, assume_yes=assume_yes, why="add the shortcut"
+            location.close_client_for_change(
+                ask, assume_yes=assume_yes, why="add the shortcut"
             )
             app_id = _write_shortcut(
                 location,
@@ -467,8 +436,7 @@ def _update_existing(  # noqa: PLR0913
         *(["icon"] if new_icon else []),
         *(["target"] if new_target else []),
     ]
-    _close_steam_for_change(
-        location,
+    location.close_client_for_change(
         ask,
         assume_yes=assume_yes,
         why=f'update the {" and ".join(changes)} of "{label}"',

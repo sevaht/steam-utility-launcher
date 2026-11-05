@@ -480,6 +480,88 @@ study it but not redistribute or modify it, so it is downloaded from ZEmu's
 releases when you run this and is never bundled here, and none of its code is
 used. ZEmu Launcher — https://zemu.uk
 
+### Dark Souls II controls
+
+Dark Souls II: Scholar of the First Sin keeps its keyboard and mouse controls
+in its save file, so they can be set without going through the menus. Close the
+game, then run:
+```bash
+steam-utility-launcher ds2-bindings
+```
+This finds the game's save in its Proton prefix, backs it up beside itself
+(`DS2SOFS0000.sl2.sul-backup-<time>`), and sets every control listed in the
+bundled `resources/ds2_key_bindings.toml`. Only the controls are changed; the
+rest of the file is left as it was.
+
+The config names each action and what to set it to:
+```toml
+[keyboard]
+run_forward = "W"
+function_1 = "P"
+toggle_menu_left = { key = "Left", modifier = "Shift" }
+
+[mouse]
+attack_right_hand = "Right click"
+jump = { button = "Click mouse wheel", modifier = "Shift" }
+```
+Pass `--config` for a file of your own; actions it doesn't list are left
+alone, and setting a plain key clears any modifier it had. `--show` prints the
+save's controls in this same format (a good way to start your own file),
+`--dry-run` says what would change without changing it, and `--save` names a
+save file to use instead of looking for one.
+
+The game rewrites its save when it exits, so it must not be running; the
+command refuses to write if it is.
+
+There doesn't have to be a save yet. To make one, for the Steam account in
+use (or the one `--steam-id` names, by its 17 digit id or the 16 hex digits of
+a save's folder):
+```bash
+steam-utility-launcher ds2-bindings --create
+```
+It makes the save in the game's Proton prefix, with the controls set and the
+game's terms and conditions marked as accepted (so it doesn't ask; leave that
+to the game with `--no-accept-terms`), and with every character slot empty. It
+never replaces a save that is there. It writes only what the game reads, so the
+file is the size of a real save but holds none of the leftover data one does.
+Proton fills in the rest of the prefix when the game is first started.
+
+Keys are named (`A`..`Z`, `0`..`9`, `Esc`, `Enter`, `Space`, `Up`, ...). Only
+keys seen in the game are named, so others (the function and numpad keys, for
+one) have to be given by number, as the game stores them; `--show` prints a
+control set to one as a number. The bundled file is one particular scheme, to
+go with a Steam Input layout that sends those keys from a gamepad.
+
+### Dark Souls II controller layout
+
+The controls above are keyboard keys, so playing on a gamepad needs Steam Input
+to send them. This program ships the layout for that (in `resources/`), which
+maps the buttons to the keys of the bundled controls, and can have Steam use it
+for the game, whatever the controller:
+```bash
+steam-utility-launcher ds2-controller
+```
+Steam keeps a layout, and the choice of which a game uses, for each kind of
+controller, so this puts the layout in place for each: generic (the XInput-style
+gamepads Steam has no type of its own for, such as 8BitDo's), Xbox 360, Xbox
+One (which Steam also uses for the Elite), PS4, PS5 and Switch Pro. The layouts
+are the same buttons and keys, told apart in Steam by their titles ("DS2 SOTFS
+(sevaht) - PS5"). `--controller-type` (once for each) limits it to some kinds.
+Choices Steam has for a particular controller, by its USB ids, may take
+priority; the command lists any it finds for the game that aren't this layout.
+
+The layout is of the buttons by where they are, as on an Xbox: A is the bottom
+face button. On a Switch controller that is its B, unless the controller's
+"Use Nintendo button layout" setting in Steam is on, which is up to you and is
+not changed here.
+
+Steam keeps the layouts and the choices in memory and saves them when it exits,
+so it has to be closed for the change; the command asks first (`-y` to skip the
+question) and starts it again afterwards (`--no-restart` to leave it closed).
+Files it replaces are backed up beside themselves, and nothing is touched, or
+closed, if Steam already uses the layouts. `--dry-run` says what would change,
+and `--layout` uses a layout file of your own (as Steam saves one) instead.
+
 ### Manual usage
 
 Run any arbitrary Windows executable inside a game's Proton prefix. The game's

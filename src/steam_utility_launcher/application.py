@@ -11,8 +11,19 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import __version__, hwid_access, proton_tools
+from . import (
+    __version__,
+    ds2_bindings,
+    ds2_controller,
+    hwid_access,
+    proton_tools,
+)
 from .steam import CompatSession, Steam
+from .steam_input import (
+    CONTROLLER_TYPES,
+    ControllerType,
+    parse_controller_type,
+)
 from .utilities import (
     dsr_gadget,
     hitman_peacock,
@@ -116,6 +127,13 @@ def _resolve_game_id(args: argparse.Namespace) -> str:
     return str(args.game_id)
 
 
+def _controller_type_argument(text: str) -> ControllerType:
+    try:
+        return parse_controller_type(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+
+
 def _hud_argument(text: str) -> str:
     try:
         return rotk_launcher.hud_value(text)
@@ -135,6 +153,123 @@ def _vsync_argument(text: str) -> int:
         return rotk_launcher.vsync_value(text)
     except ValueError as error:
         raise argparse.ArgumentTypeError(str(error)) from None
+
+
+def _add_ds2_bindings_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    ds2_bindings_parser = subparsers.add_parser(
+        "ds2-bindings",
+        help=(
+            "Set Dark Souls II: Scholar of the First Sin's keyboard and mouse"
+            " controls, which the game keeps in its save file. The game has"
+            " to be closed."
+        ),
+    )
+    ds2_bindings_parser.add_argument(
+        "--config",
+        help=(
+            "A TOML file of the controls to set (see resources/"
+            "ds2_key_bindings.toml); defaults to the bundled one."
+        ),
+    )
+    ds2_bindings_parser.add_argument(
+        "--save",
+        help="The save file (DS2SOFS0000.sl2); defaults to the one in Proton.",
+    )
+    ds2_bindings_parser.add_argument(
+        "--show",
+        action="store_true",
+        help=(
+            "Print the save file's controls, as a config file, instead of"
+            " changing them."
+        ),
+    )
+    ds2_bindings_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Say what would change, without changing anything.",
+    )
+    ds2_bindings_parser.add_argument(
+        "--create",
+        action="store_true",
+        help=(
+            "Make a new save (for the Steam account in use, or --steam-id),"
+            " with the controls set and the game's terms and conditions"
+            " accepted, instead of changing one. It won't replace a save."
+        ),
+    )
+    ds2_bindings_parser.add_argument(
+        "--steam-id",
+        help=(
+            "The Steam account a new save is for: its 17 digit id, or the 16"
+            " hex digits of the folder a save is in. Defaults to the account"
+            " in use."
+        ),
+    )
+    ds2_bindings_parser.add_argument(
+        "--no-accept-terms",
+        action="store_true",
+        help="With --create, leave the game to ask about its terms itself.",
+    )
+
+
+def _add_ds2_controller_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    parser = subparsers.add_parser(
+        "ds2-controller",
+        help=(
+            "Have Steam use this program's controller layout for Dark Souls"
+            " II: Scholar of the First Sin, which sends the keys the controls"
+            " from ds2-bindings use from a gamepad's buttons."
+        ),
+    )
+    parser.add_argument(
+        "--layout",
+        help=(
+            "A layout file (as Steam saves one) to use instead of the"
+            " bundled one."
+        ),
+    )
+    parser.add_argument(
+        "--controller-type",
+        action="append",
+        dest="controller_types",
+        type=_controller_type_argument,
+        metavar="TYPE",
+        help=(
+            "A kind of controller to set the layout for (generic, xbox360,"
+            " xboxone, ps4, ps5, switch_pro); give it more than once for"
+            " several. By default, all of them."
+        ),
+    )
+    parser.add_argument(
+        "--keep-device-choices",
+        action="store_true",
+        help=(
+            "Leave alone the layouts Steam has chosen for particular"
+            " controllers (by their USB ids), which take priority over the"
+            " choice for their kind. By default they are changed to this"
+            " layout, for the kind of controller each one's layout is for."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Say what would change, without changing anything.",
+    )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Don't ask before closing Steam, which has to be closed.",
+    )
+    parser.add_argument(
+        "--no-restart",
+        action="store_true",
+        help="Don't start Steam again afterwards, if it had to be closed.",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -402,6 +537,8 @@ def _build_parser() -> argparse.ArgumentParser:
             " stable one installed."
         ),
     )
+    _add_ds2_bindings_parser(subparsers)
+    _add_ds2_controller_parser(subparsers)
     hwid_access_parser = subparsers.add_parser(
         "enable-hwid-access",
         help=(
@@ -503,6 +640,58 @@ def _install_proton(*, name: str | None, tag: str, force: bool) -> int:
     return 0
 
 
+def _set_ds2_bindings(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> int:
+    if args.show and args.create:
+        parser.error("--show and --create can't be used together.")
+    if args.steam_id and not args.create:
+        parser.error("--steam-id is only for --create.")
+    try:
+        steam_id = (
+            ds2_bindings.parse_steam_id(args.steam_id)
+            if args.steam_id
+            else None
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    needs_steam = not args.save or (args.create and steam_id is None)
+    if needs_steam and sys.platform != "linux":
+        parser.error("--save (and --steam-id) are required except on Linux.")
+    return ds2_bindings.run(
+        save=Path(args.save) if args.save else None,
+        config=Path(args.config) if args.config else None,
+        show=args.show,
+        dry_run=args.dry_run,
+        create=args.create,
+        accept_terms=not args.no_accept_terms,
+        steam_id=steam_id,
+        steam=Steam.from_detection() if needs_steam else None,
+    )
+
+
+def _use_ds2_controller(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> int:
+    if sys.platform != "linux":
+        parser.error("Steam's controller layouts are only handled on Linux.")
+    return ds2_controller.run(
+        steam=Steam.from_detection(),
+        layout_file=Path(args.layout) if args.layout else None,
+        controller_types=args.controller_types or CONTROLLER_TYPES,
+        keep_device_choices=args.keep_device_choices,
+        assume_yes=args.yes,
+        dry_run=args.dry_run,
+        restart=not args.no_restart,
+    )
+
+
+def _run_ds2(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    if args.mode == "ds2-controller":
+        return _use_ds2_controller(args, parser)
+    return _set_ds2_bindings(args, parser)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(args=argv)
@@ -536,6 +725,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return return_code
     elif args.mode == "enable-hwid-access":
         return hwid_access.run(disable=args.disable, assume_yes=args.yes)
+    elif args.mode in {"ds2-bindings", "ds2-controller"}:
+        return _run_ds2(args, parser)
     elif args.mode == "proton":
         return _install_proton(name=args.name, tag=args.tag, force=args.force)
     elif args.mode == "prefix-path":
