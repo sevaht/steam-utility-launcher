@@ -55,13 +55,6 @@ def _proton(root: Path) -> CompatibilityTool:
     )
 
 
-def test_a_game_goes_through_the_proton_script(tmp_path: Path) -> None:
-    tool = _proton(tmp_path)
-    runner, command = tool.launch_command(["game.exe"], via_script=True)
-    assert command == [str(tool.binary_path), "waitforexitandrun", "game.exe"]
-    assert runner == [str(tmp_path / "Proton/files/bin/wine")]  # for `reg`
-
-
 def test_utilities_still_use_the_bare_wine(tmp_path: Path) -> None:
     tool = _proton(tmp_path)
     _, command = tool.launch_command(["util.exe"])
@@ -124,12 +117,8 @@ def test_the_environment_for_a_prefix_has_proton_and_its_overrides(
     tool = _proton(tmp_path)
     prefix = WinePrefix(tmp_path / "pfx")
     env = {"WINEDLLOVERRIDES": "mine=n"}
-    tool.add_environment(env, prefix, via_script=False)
+    tool.add_environment(env, prefix)
     assert env["PROTON_DIR"] == str(tool.binary_path.parent)
     assert env["WINEDLLOVERRIDES"] == (
         "beclient,beclient_x64=b,n;winebth.sys=d;mine=n"
     )
-    # Proton's own script sets those itself
-    scripted: dict[str, str] = {}
-    tool.add_environment(scripted, prefix, via_script=True)
-    assert scripted == {"PROTON_DIR": str(tool.binary_path.parent)}

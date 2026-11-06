@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import json
 import stat
-import sys
 from pathlib import Path
 
 import pytest
 
 from steam_utility_launcher import minisign, update_check
+from steam_utility_launcher.games import Z1_BATTLE_ROYALE_ID
 from steam_utility_launcher.github_release_updater import Release
-from steam_utility_launcher.steam import CompatibilityTool
+from steam_utility_launcher.host import LinuxHost, WindowsHost
+from steam_utility_launcher.steam import CompatibilityTool, Steam
 from steam_utility_launcher.utilities import zemu
+from steam_utility_launcher.utilities.zemu import ZEmuLauncher
 
 from .signing import make_keys, sign
+from .steam_helper import make_steam
 
 _ASSET = Path("ZEmu.Launcher_9.9.9_amd64.AppImage")
 _SIG = Path(_ASSET.name + ".sig")
@@ -171,26 +174,26 @@ def _tool(
     )
 
 
-class _FakeSteam:
-    def __init__(
-        self, tools: list[CompatibilityTool], z1_tool: str = ""
-    ) -> None:
-        self.compatibility_tools = tools
-        self._z1_tool = z1_tool
-
-    def game_compatibility_tool(self, game_id: str) -> str:
-        assert game_id == "433850"
-        return self._z1_tool
+def _steam(
+    root: Path, tools: list[CompatibilityTool], z1_tool: str = ""
+) -> Steam:
+    """A Steam with these tools, set to run Z1 Battle Royale with `z1_tool`
+    if one is given."""
+    return make_steam(
+        root,
+        tools,
+        tool_choices={Z1_BATTLE_ROYALE_ID: z1_tool} if z1_tool else None,
+    )
 
 
 def test_an_explicit_proton_wins(tmp_path: Path) -> None:
     folder = tmp_path / "MyProton"
     folder.mkdir()
     (folder / "proton").write_text("x")
-    steam = _FakeSteam([_tool(tmp_path, "Proton 10.0")], "proton_10")
-    assert zemu.pick_proton(steam, folder) == folder / "proton"  # type: ignore[arg-type]
-    assert zemu.pick_proton(steam, folder / "proton") == folder / "proton"  # type: ignore[arg-type]
-    assert zemu.pick_proton(steam, tmp_path / "missing") is None  # type: ignore[arg-type]
+    steam = _steam(tmp_path, [_tool(tmp_path, "Proton 10.0")], "proton_10")
+    assert zemu.pick_proton(steam, folder) == folder / "proton"
+    assert zemu.pick_proton(steam, folder / "proton") == folder / "proton"
+    assert zemu.pick_proton(steam, tmp_path / "missing") is None
 
 
 def test_the_proton_steam_uses_for_z1_is_preferred(tmp_path: Path) -> None:
@@ -200,7 +203,7 @@ def test_the_proton_steam_uses_for_z1_is_preferred(tmp_path: Path) -> None:
         _tool(tmp_path, "Proton 9.0 (Beta)"),
     ]
     # Steam's own config names it "proton_10"; the folder is "Proton 10.0".
-    chosen = zemu.pick_proton(_FakeSteam(tools, "proton_10"), None)  # type: ignore[arg-type]
+    chosen = zemu.pick_proton(_steam(tmp_path, tools, "proton_10"), None)
     assert chosen == tools[1].binary_path
 
 
@@ -212,7 +215,7 @@ def test_otherwise_the_newest_stable_proton_is_chosen(tmp_path: Path) -> None:
         _tool(tmp_path, "Proton Hotfix"),
         _tool(tmp_path, "Proton 9.0 (Beta)"),
     ]
-    chosen = zemu.pick_proton(_FakeSteam(tools), None)  # type: ignore[arg-type]
+    chosen = zemu.pick_proton(_steam(tmp_path, tools), None)
     assert chosen == tools[1].binary_path
 
 
@@ -220,18 +223,40 @@ def test_a_missing_binary_is_skipped(tmp_path: Path) -> None:
     broken = _tool(tmp_path, "Proton 11.0", exists=False)
     working = _tool(tmp_path, "Proton 10.0")
     chosen = zemu.pick_proton(
-        _FakeSteam([broken, working], "proton_11"), None  # type: ignore[arg-type]
+        _steam(tmp_path, [broken, working], "proton_11"), None
     )
     assert chosen == working.binary_path
 
 
 def test_no_proton_means_none(tmp_path: Path) -> None:
     only_experimental = [_tool(tmp_path, "Proton - Experimental")]
-    assert zemu.pick_proton(_FakeSteam(only_experimental), None) is None  # type: ignore[arg-type]
-    assert zemu.pick_proton(_FakeSteam([]), None) is None  # type: ignore[arg-type]
+    assert zemu.pick_proton(_steam(tmp_path, only_experimental), None) is None
+    assert zemu.pick_proton(_steam(tmp_path, []), None) is None
 
 
 # ----------------------------------------------------------- install + verify
+
+
+class _LinuxHost(LinuxHost):
+    """A Linux that keeps this program's data in `data`."""
+
+    def __init__(self, data: Path) -> None:
+        self._data = data
+
+    @property
+    def data_directory(self) -> Path:
+        return self._data
+
+
+class _WindowsHost(WindowsHost):
+    """A Windows that keeps this program's data in `data`."""
+
+    def __init__(self, data: Path) -> None:
+        self._data = data
+
+    @property
+    def data_directory(self) -> Path:
+        return self._data
 
 
 class _World:
@@ -249,8 +274,8 @@ class _World:
             tag=self.tag,
             asset_urls={_ASSET: "https://x/app", _SIG: "https://x/app.sig"},
         )
-        monkeypatch.setattr(zemu, "XDG_DATA_ROOT", tmp_path / "data")
-        monkeypatch.setattr(sys, "platform", "linux")
+        self.data = tmp_path / "data"
+        self.launcher = ZEmuLauncher(_LinuxHost(self.data))
         monkeypatch.setattr(zemu, "_PUBLIC_KEY", self.public_key)
         monkeypatch.setattr(zemu, "https_get", self._get)
         monkeypatch.setattr(zemu, "_REPOSITORY", self)
@@ -269,7 +294,7 @@ class _World:
 
     @property
     def appimage(self) -> Path:
-        return zemu.install_directory() / "ZEmu-Launcher.AppImage"
+        return self.launcher.install_directory / "ZEmu-Launcher.AppImage"
 
 
 @pytest.fixture
@@ -280,20 +305,22 @@ def world(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _World:
 def test_a_fresh_install_is_verified_executable_and_tagged(
     world: _World,
 ) -> None:
-    zemu._install_if_needed(force=False)
+    world.launcher._install_if_needed(force=False)
     assert world.appimage.read_bytes() == _CONTENT
     assert world.appimage.stat().st_mode & stat.S_IXUSR
-    tag = (zemu.install_directory() / ".github_release_tag").read_text()
+    tag = (
+        world.launcher.install_directory / ".github_release_tag"
+    ).read_text()
     assert tag == "v9.9.9"
-    assert not list(zemu.install_directory().glob("*.part"))
+    assert not list(world.launcher.install_directory.glob("*.part"))
 
 
 def test_tampered_content_is_never_installed(world: _World) -> None:
     world.content = _CONTENT + b"malware"
     with pytest.raises(zemu.InstallError, match="signature verification"):
-        zemu._install_if_needed(force=False)
+        world.launcher._install_if_needed(force=False)
     assert not world.appimage.exists()
-    assert not list(zemu.install_directory().glob("*.part"))
+    assert not list(world.launcher.install_directory.glob("*.part"))
 
 
 def test_a_signature_from_another_key_is_refused(
@@ -302,7 +329,7 @@ def test_a_signature_from_another_key_is_refused(
     _, other_public = make_keys()
     monkeypatch.setattr(zemu, "_PUBLIC_KEY", other_public)
     with pytest.raises(zemu.InstallError, match="signature verification"):
-        zemu._install_if_needed(force=False)
+        world.launcher._install_if_needed(force=False)
     assert not world.appimage.exists()
 
 
@@ -313,61 +340,62 @@ def test_a_signature_for_a_different_file_is_refused(world: _World) -> None:
         comment="timestamp:1\tfile:ZEmu Launcher_1.0.0_amd64.AppImage",
     )
     with pytest.raises(zemu.InstallError, match="different file"):
-        zemu._install_if_needed(force=False)
+        world.launcher._install_if_needed(force=False)
     assert not world.appimage.exists()
 
 
 def test_a_release_without_a_signature_is_refused(world: _World) -> None:
     world.release = Release(tag="v9.9.9", asset_urls={_ASSET: "https://x/app"})
     with pytest.raises(zemu.InstallError, match="no signature"):
-        zemu._install_if_needed(force=False)
+        world.launcher._install_if_needed(force=False)
     assert not world.appimage.exists()
 
 
-@pytest.mark.usefixtures("world")
-def test_an_http_error_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_http_error_is_reported(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(zemu, "https_get", lambda _url: (503, b""))
     with pytest.raises(zemu.InstallError, match="HTTP status 503"):
-        zemu._install_if_needed(force=False)
+        world.launcher._install_if_needed(force=False)
 
 
 def test_no_release_or_no_matching_asset_is_an_error(world: _World) -> None:
     world.release = None
     with pytest.raises(zemu.InstallError, match="No release"):
-        zemu._install_if_needed(force=False)
+        world.launcher._install_if_needed(force=False)
     world.release = Release(tag="v1", asset_urls={Path("other.zip"): "u"})
     with pytest.raises(zemu.InstallError, match="no ZEmu Launcher download"):
-        zemu._install_if_needed(force=False)
+        world.launcher._install_if_needed(force=False)
 
 
 def test_an_installed_launcher_checked_today_does_no_network(
     world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    zemu._install_if_needed(force=False)
+    world.launcher._install_if_needed(force=False)
     world.downloads.clear()
     monkeypatch.setattr(zemu, "_REPOSITORY", None)  # would crash if consulted
-    zemu._install_if_needed(force=False)
+    world.launcher._install_if_needed(force=False)
     assert world.downloads == []
 
 
 def test_a_newer_release_only_warns_unless_forced(
     world: _World, caplog: pytest.LogCaptureFixture
 ) -> None:
-    zemu._install_if_needed(force=False)
-    (zemu.install_directory() / update_check.MARKER_FILE_NAME).unlink()
+    world.launcher._install_if_needed(force=False)
+    (world.launcher.install_directory / update_check.MARKER_FILE_NAME).unlink()
     world.release = Release(
         tag="v10.0.0",
         asset_urls={_ASSET: "https://x/app", _SIG: "https://x/app.sig"},
     )
     world.downloads.clear()
     with caplog.at_level("WARNING"):
-        zemu._install_if_needed(force=False)
+        world.launcher._install_if_needed(force=False)
     assert "update available" in caplog.text
     assert world.downloads == []  # warned, did not download
-    tag_file = zemu.install_directory() / ".github_release_tag"
+    tag_file = world.launcher.install_directory / ".github_release_tag"
     assert tag_file.read_text() == "v9.9.9"
 
-    zemu._install_if_needed(force=True)
+    world.launcher._install_if_needed(force=True)
     assert tag_file.read_text() == "v10.0.0"
     assert world.downloads  # --force did download
 
@@ -404,26 +432,24 @@ def launched(
     assert world.tag  # requested for its fake release and network
     _FakeProcess.instances = []
     monkeypatch.setattr(zemu, "Process", _FakeProcess)
-    monkeypatch.setattr(
-        "steam_utility_launcher.utilities.zemu.sys.platform", "linux"
-    )
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     return _FakeProcess.instances
 
 
 def test_launch_installs_configures_and_runs_the_appimage(
+    world: _World,
     launched: list[_FakeProcess],
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     tool = _tool(tmp_path / "steam", "Proton 10.0")
-    steam = _FakeSteam([tool], "proton_10")
-    assert zemu.launch(steam=steam) == 3  # type: ignore[arg-type]
+    steam = _steam(tmp_path / "steam", [tool], "proton_10")
+    assert world.launcher.launch(steam=steam) == 3
     (process,) = launched
     assert process.command_line == [
-        str(zemu.install_directory() / "ZEmu-Launcher.AppImage")
+        str(world.launcher.install_directory / "ZEmu-Launcher.AppImage")
     ]
-    assert process.cwd == zemu.install_directory()
+    assert process.cwd == world.launcher.install_directory
     assert (
         "zemu.uk" in capsys.readouterr().err
     )  # the credit the licence asks for
@@ -434,40 +460,36 @@ def test_launch_installs_configures_and_runs_the_appimage(
 
 
 def test_no_configure_leaves_zemus_settings_alone(
-    launched: list[_FakeProcess], tmp_path: Path
+    world: _World, launched: list[_FakeProcess], tmp_path: Path
 ) -> None:
-    steam = _FakeSteam([_tool(tmp_path / "steam", "Proton 10.0")], "proton_10")
-    assert zemu.launch(steam=steam, configure=False) == 3  # type: ignore[arg-type]
+    steam = _steam(
+        tmp_path / "steam",
+        [_tool(tmp_path / "steam", "Proton 10.0")],
+        "proton_10",
+    )
+    assert world.launcher.launch(steam=steam, configure=False) == 3
     assert len(launched) == 1
     assert not (tmp_path / "xdg" / "uk.zemu.launcher").exists()
 
 
 def test_without_any_proton_it_still_launches_with_a_warning(
-    launched: list[_FakeProcess], caplog: pytest.LogCaptureFixture
+    world: _World,
+    launched: list[_FakeProcess],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level("WARNING"):
-        assert zemu.launch(steam=_FakeSteam([])) == 3  # type: ignore[arg-type]
+        assert world.launcher.launch(steam=_steam(tmp_path, [])) == 3
     assert "No Proton install found" in caplog.text
     assert len(launched) == 1
 
 
 def test_a_failed_install_stops_before_anything_runs(
-    launched: list[_FakeProcess],
-    world: _World,
-    caplog: pytest.LogCaptureFixture,
+    launched: list[_FakeProcess], world: _World, tmp_path: Path
 ) -> None:
     world.content = b"tampered"
-    with caplog.at_level("ERROR"):
-        assert zemu.launch(steam=_FakeSteam([])) == 1  # type: ignore[arg-type]
-    assert "signature verification" in caplog.text
-    assert launched == []
-
-
-def test_other_platforms_are_refused(
-    launched: list[_FakeProcess], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    assert zemu.launch(steam=None) == 1
+    with pytest.raises(zemu.InstallError, match="signature verification"):
+        world.launcher.launch(steam=_steam(tmp_path, []))
     assert launched == []
 
 
@@ -498,7 +520,7 @@ class _Installer:
 def windows(
     world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[_World, _Installer]:
-    monkeypatch.setattr(sys, "platform", "win32")
+    world.launcher = ZEmuLauncher(_WindowsHost(world.data))
     world.release = Release(
         tag=world.tag,
         asset_urls={
@@ -522,13 +544,17 @@ def windows(
 def test_windows_installs_the_verified_installer_into_the_app_directory(
     windows: tuple[_World, _Installer],
 ) -> None:
-    _, installer = windows
-    zemu._install_if_needed(force=False)
-    assert installer.calls == [(_CONTENT, zemu.windows_app_directory())]
-    executable = zemu.installed_executable()
+    world, installer = windows
+    world.launcher._install_if_needed(force=False)
+    assert installer.calls == [
+        (_CONTENT, world.launcher.windows_app_directory)
+    ]
+    executable = world.launcher.installed_executable()
     assert executable is not None
     assert executable.name == "ZEmu Launcher.exe"
-    tag = (zemu.install_directory() / ".github_release_tag").read_text()
+    tag = (
+        world.launcher.install_directory / ".github_release_tag"
+    ).read_text()
     assert tag == "v9.9.9"
 
 
@@ -538,38 +564,39 @@ def test_windows_never_runs_an_installer_that_fails_verification(
     world, installer = windows
     world.content = _CONTENT + b"malware"
     with pytest.raises(zemu.InstallError, match="signature verification"):
-        zemu._install_if_needed(force=False)
+        world.launcher._install_if_needed(force=False)
     assert installer.calls == []
-    assert zemu.installed_executable() is None
+    assert world.launcher.installed_executable() is None
 
 
-@pytest.mark.usefixtures("windows")
 def test_windows_installer_failure_is_reported_and_not_tagged(
-    monkeypatch: pytest.MonkeyPatch,
+    windows: tuple[_World, _Installer], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         zemu, "_run_windows_installer", _Installer(exit_code=2, files=())
     )
     with pytest.raises(zemu.InstallError, match="status 2"):
-        zemu._install_if_needed(force=False)
-    assert not (zemu.install_directory() / ".github_release_tag").exists()
+        windows[0].launcher._install_if_needed(force=False)
+    assert not (
+        windows[0].launcher.install_directory / ".github_release_tag"
+    ).exists()
 
 
-@pytest.mark.usefixtures("windows")
 def test_windows_install_that_leaves_no_app_is_an_error(
-    monkeypatch: pytest.MonkeyPatch,
+    windows: tuple[_World, _Installer], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         zemu, "_run_windows_installer", _Installer(files=("uninstall.exe",))
     )
     with pytest.raises(zemu.InstallError, match="wasn't found"):
-        zemu._install_if_needed(force=False)
-    assert not (zemu.install_directory() / ".github_release_tag").exists()
+        windows[0].launcher._install_if_needed(force=False)
+    assert not (
+        windows[0].launcher.install_directory / ".github_release_tag"
+    ).exists()
 
 
-@pytest.mark.usefixtures("windows")
 def test_windows_an_ambiguous_app_directory_is_not_guessed(
-    monkeypatch: pytest.MonkeyPatch,
+    windows: tuple[_World, _Installer], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         zemu,
@@ -577,7 +604,7 @@ def test_windows_an_ambiguous_app_directory_is_not_guessed(
         _Installer(files=("a.exe", "b.exe", "uninstall.exe")),
     )
     with pytest.raises(zemu.InstallError, match="wasn't found"):
-        zemu._install_if_needed(force=False)
+        windows[0].launcher._install_if_needed(force=False)
 
 
 def test_windows_without_a_windows_download_is_an_error(
@@ -586,20 +613,21 @@ def test_windows_without_a_windows_download_is_an_error(
     world, _ = windows
     world.release = Release(tag="v1", asset_urls={_ASSET: "u", _SIG: "s"})
     with pytest.raises(zemu.InstallError, match="no ZEmu Launcher download"):
-        zemu._install_if_needed(force=False)
+        world.launcher._install_if_needed(force=False)
 
 
-@pytest.mark.usefixtures("windows")
 def test_windows_launch_runs_the_app_without_proton_or_config(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    windows: tuple[_World, _Installer],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     _FakeProcess.instances = []
     monkeypatch.setattr(zemu, "Process", _FakeProcess)
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
-    assert zemu.launch(steam=None) == 3
+    assert windows[0].launcher.launch(steam=None) == 3
     (process,) = _FakeProcess.instances
     assert process.command_line == [
-        str(zemu.windows_app_directory() / "ZEmu Launcher.exe")
+        str(windows[0].launcher.windows_app_directory / "ZEmu Launcher.exe")
     ]
     assert not (tmp_path / "xdg" / "uk.zemu.launcher").exists()
 

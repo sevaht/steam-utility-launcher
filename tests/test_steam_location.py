@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from steam_utility_launcher.steam import SteamError, SteamLocation
+from steam_utility_launcher.host import LinuxHost
+from steam_utility_launcher.steam import SteamClient, SteamError, SteamLocation
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -15,20 +16,24 @@ def _location(root: Path) -> SteamLocation:
     return SteamLocation(root=root, system_config_dirs=[])
 
 
+def _client(root: Path) -> SteamClient:
+    return SteamClient(_location(root), LinuxHost())
+
+
 def test_the_client_is_started_by_the_steam_on_the_path_or_by_its_script(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    location = _location(tmp_path)
+    host = LinuxHost()
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/steam")
-    assert location.client_program() == "/usr/bin/steam"
+    assert host.steam_client_command(tmp_path) == ["/usr/bin/steam"]
     monkeypatch.setattr("shutil.which", lambda _name: None)
-    assert location.client_program() == str(tmp_path / "steam.sh")
+    assert host.steam_client_command(tmp_path) == [str(tmp_path / "steam.sh")]
 
 
 def test_the_client_is_asked_to_exit_and_waited_for(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    location = _location(tmp_path)
+    client = _client(tmp_path)
     monkeypatch.setattr("shutil.which", lambda _name: "/bin/steam")
     asked: list[list[str]] = []
     monkeypatch.setattr(
@@ -36,12 +41,10 @@ def test_the_client_is_asked_to_exit_and_waited_for(
     )
     still_running = [True, True, False]
     monkeypatch.setattr(
-        SteamLocation,
-        "is_client_running",
-        staticmethod(lambda: still_running.pop(0)),
+        SteamClient, "is_running", staticmethod(lambda: still_running.pop(0))
     )
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
-    location.shut_down_client()
+    client.shut_down()
     assert asked == [["/bin/steam", "-shutdown"]]
     assert still_running == []
 
@@ -49,16 +52,14 @@ def test_the_client_is_asked_to_exit_and_waited_for(
 def test_a_client_that_does_not_exit_is_an_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    location = _location(tmp_path)
+    client = _client(tmp_path)
     monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: None)
-    monkeypatch.setattr(
-        SteamLocation, "is_client_running", staticmethod(lambda: True)
-    )
+    monkeypatch.setattr(SteamClient, "is_running", staticmethod(lambda: True))
     clock = iter(range(0, 10_000, 40))
     monkeypatch.setattr("time.monotonic", lambda: next(clock))
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
     with pytest.raises(SteamError, match="did not close"):
-        location.shut_down_client()
+        client.shut_down()
 
 
 def test_a_client_that_cannot_be_told_to_exit_is_an_error(
@@ -70,7 +71,7 @@ def test_a_client_that_cannot_be_told_to_exit_is_an_error(
 
     monkeypatch.setattr(subprocess, "run", fail)
     with pytest.raises(SteamError, match="Could not tell Steam to close"):
-        _location(tmp_path).shut_down_client()
+        _client(tmp_path).shut_down()
 
 
 def test_a_game_that_cannot_be_started_is_an_error(
@@ -82,7 +83,7 @@ def test_a_game_that_cannot_be_started_is_an_error(
 
     monkeypatch.setattr(subprocess, "Popen", fail)
     with pytest.raises(SteamError, match="Could not start the game"):
-        _location(tmp_path).launch_game(42)
+        _client(tmp_path).launch_game(42)
 
 
 def test_an_unreadable_account_list_is_an_error(tmp_path: Path) -> None:
@@ -139,11 +140,9 @@ def test_steam_is_closed_for_a_change_after_asking(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     closed: list[bool] = []
+    monkeypatch.setattr(SteamClient, "is_running", staticmethod(lambda: True))
     monkeypatch.setattr(
-        SteamLocation, "is_client_running", staticmethod(lambda: True)
-    )
-    monkeypatch.setattr(
-        SteamLocation, "shut_down_client", lambda _self: closed.append(True)
+        SteamClient, "shut_down", lambda _self: closed.append(True)
     )
     prompts: list[str] = []
 
@@ -151,7 +150,7 @@ def test_steam_is_closed_for_a_change_after_asking(
         prompts.append(prompt)
         return " Yes "
 
-    assert _location(tmp_path).close_client_for_change(
+    assert _client(tmp_path).close_for_change(
         ask, assume_yes=False, why="do a thing"
     )
     assert closed == [True]
@@ -161,14 +160,12 @@ def test_steam_is_closed_for_a_change_after_asking(
 def test_a_steam_that_is_not_running_is_left_alone(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(
-        SteamLocation, "is_client_running", staticmethod(lambda: False)
-    )
+    monkeypatch.setattr(SteamClient, "is_running", staticmethod(lambda: False))
 
     def never(_prompt: str) -> str:
         pytest.fail("nothing to ask about")
 
-    assert not _location(tmp_path).close_client_for_change(
+    assert not _client(tmp_path).close_for_change(
         never, assume_yes=False, why="x"
     )
 
@@ -180,12 +177,10 @@ def test_steam_is_not_closed_if_the_answer_is_not_yes(
     def must_not_close(_self: object) -> None:
         pytest.fail("it should not have been closed")
 
-    monkeypatch.setattr(
-        SteamLocation, "is_client_running", staticmethod(lambda: True)
-    )
-    monkeypatch.setattr(SteamLocation, "shut_down_client", must_not_close)
+    monkeypatch.setattr(SteamClient, "is_running", staticmethod(lambda: True))
+    monkeypatch.setattr(SteamClient, "shut_down", must_not_close)
     with pytest.raises(SteamError, match="Close Steam, then run this again"):
-        _location(tmp_path).close_client_for_change(
+        _client(tmp_path).close_for_change(
             lambda _p: answer, assume_yes=False, why="x"
         )
 
@@ -193,17 +188,13 @@ def test_steam_is_not_closed_if_the_answer_is_not_yes(
 def test_no_answer_at_all_is_a_no(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(
-        SteamLocation, "is_client_running", staticmethod(lambda: True)
-    )
+    monkeypatch.setattr(SteamClient, "is_running", staticmethod(lambda: True))
 
     def eof(_prompt: str) -> str:
         raise EOFError
 
     with pytest.raises(SteamError, match="Close Steam"):
-        _location(tmp_path).close_client_for_change(
-            eof, assume_yes=False, why="x"
-        )
+        _client(tmp_path).close_for_change(eof, assume_yes=False, why="x")
 
 
 def test_steam_is_started_on_its_own(
@@ -216,7 +207,7 @@ def test_steam_is_started_on_its_own(
 
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/steam")
     monkeypatch.setattr(subprocess, "Popen", popen)
-    _location(tmp_path).start_client()
+    _client(tmp_path).start()
     assert started == [(["/usr/bin/steam"], True)]
 
 
@@ -229,4 +220,4 @@ def test_steam_that_cannot_be_started_is_an_error(
 
     monkeypatch.setattr(subprocess, "Popen", fail)
     with pytest.raises(SteamError, match="Could not start Steam"):
-        _location(tmp_path).start_client()
+        _client(tmp_path).start()

@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, override
 
 import pytest
 
 from steam_utility_launcher import (
     hwid_access,
     powershell_log,
-    steam_shortcuts,
     svt_ge_proton,
     update_check,
     vc_runtime,
@@ -18,39 +17,51 @@ from steam_utility_launcher.github_release_updater import (
     ApplicationUpdater,
     Release,
 )
+from steam_utility_launcher.host import LinuxHost, WindowsHost
+from steam_utility_launcher.programs import NativeWindows
 from steam_utility_launcher.steam import (
     CompatibilityTool,
     CompatSession,
     Process,
     Steam,
+    SteamError,
     SteamLocation,
+)
+from steam_utility_launcher.steam_shortcuts import (
+    DirectStyle,
+    ShortcutManager,
+    ShortcutSpec,
+    WrapperStyle,
 )
 from steam_utility_launcher.utilities import rotk_launcher
 from steam_utility_launcher.utilities.rotk_launcher import (
     LaunchOptions,
     ShortcutLaunch,
+    WindowsLaunch,
 )
 from steam_utility_launcher.wine_prefix import wine_path
 from tests.asar_helper import make_asar
+from tests.process_helper import FakeProcess
+from tests.steam_helper import bare_steam, make_location
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from steam_utility_launcher.wine_prefix import WinePrefix
 
 
-class _FakeProcess:
-    def __init__(self, on_wait: str) -> None:
-        self.on_wait = on_wait
-        self.env: dict[str, str] | None = None
+class _FakeProcess(FakeProcess):
+    """The game, which exits with status 7 after the stand-in has logged
+    `log_record` while it ran."""
 
-    def start(self) -> _FakeProcess:
-        return self
+    def __init__(self, log_record: str) -> None:
+        super().__init__(on_wait=self._run)
+        self.log_record = log_record
 
-    def wait(self, timeout: float | None = None) -> int:
-        del timeout
-        if self.on_wait:
-            # What the stand-in does while the app runs.
+    def _run(self) -> int:
+        if self.log_record:
             with powershell_log.path().open("a") as log:
-                log.write(self.on_wait)
+                log.write(self.log_record)
         return 7
 
 
@@ -60,13 +71,10 @@ _STEAM_COMMAND = ["steam-launch-wrapper", "--", "proton", "waitforexitandrun"]
 _SESSION = CompatSession(Path("/compat/1"), Path("/tools/SVT"))
 
 
-def _launch(**kwargs: object) -> int:
+def _launch(options: LaunchOptions | None = None) -> int:
     """launch() as a Steam shortcut's launch options would run it."""
-    return rotk_launcher.launch(
-        steam=object(),  # type: ignore[arg-type]
-        options=LaunchOptions(**kwargs),  # type: ignore[arg-type]
-        steam_command=_STEAM_COMMAND,
-        session=_SESSION,
+    return rotk_launcher.RotkLauncher(LinuxHost(), bare_steam()).launch(
+        options, steam_command=_STEAM_COMMAND, session=_SESSION
     )
 
 
@@ -224,7 +232,7 @@ def test_tpm_key_blobs_are_kept_in_a_private_host_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     seen = _wire(monkeypatch, tmp_path, "")
-    assert _launch(tpm=True) == 7
+    assert _launch(LaunchOptions(tpm=True)) == 7
     extra = seen["extra_env"]
     assert isinstance(extra, dict)
     assert extra["SUL_TPM"] == "1"
@@ -242,11 +250,11 @@ def test_endorsement_extras_are_off_unless_asked_for(
     extra = seen["extra_env"]
     assert isinstance(extra, dict)
     assert not {"SUL_TPM", "SUL_TPM_DIR", "SUL_TPM_ENDORSEMENT"} & set(extra)
-    _launch(tpm=True)
+    _launch(LaunchOptions(tpm=True))
     extra = seen["extra_env"]
     assert isinstance(extra, dict)
     assert "SUL_TPM_ENDORSEMENT" not in extra
-    _launch(tpm_endorsement=True)
+    _launch(LaunchOptions(tpm_endorsement=True))
     extra = seen["extra_env"]
     assert isinstance(extra, dict)
     assert extra["SUL_TPM_ENDORSEMENT"] == "1"
@@ -275,7 +283,7 @@ def test_the_steam_overlay_can_be_taken_away(
     seen["process_env"] = {
         "LD_PRELOAD": "/lib/gameoverlayrenderer.so:/lib/other.so"
     }
-    _launch(no_steam_overlay=True)
+    _launch(LaunchOptions(no_steam_overlay=True))
     extra = seen["extra_env"]
     assert isinstance(extra, dict)
     assert extra["DISABLE_VK_LAYER_VALVE_steam_overlay_1"] == "1"
@@ -329,7 +337,7 @@ def test_the_overlay_is_turned_on_for_the_game_only(
     seen = _wire(monkeypatch, tmp_path, "")
     monkeypatch.delenv("DXVK_CONFIG", raising=False)
     value = "fps,gpuload,scale=1.5,opacity=0.8"
-    _launch(hud=value)
+    _launch(LaunchOptions(hud=value))
     extra = seen["extra_env"]
     assert isinstance(extra, dict)
     # A section for the game's executable, so DXVK applies the setting to
@@ -343,7 +351,7 @@ def test_an_existing_dxvk_config_is_kept_ahead_of_the_overlay(
 ) -> None:
     seen = _wire(monkeypatch, tmp_path, "")
     monkeypatch.setenv("DXVK_CONFIG", "dxvk.maxFrameLatency=1")
-    _launch(hud="fps")
+    _launch(LaunchOptions(hud="fps"))
     extra = seen["extra_env"]
     assert isinstance(extra, dict)
     assert extra["DXVK_CONFIG"] == (
@@ -356,7 +364,7 @@ def test_a_frame_rate_limit_is_set_for_the_game_only(
 ) -> None:
     seen = _wire(monkeypatch, tmp_path, "")
     monkeypatch.delenv("DXVK_CONFIG", raising=False)
-    _launch(max_fps=144)
+    _launch(LaunchOptions(max_fps=144))
     extra = seen["extra_env"]
     assert isinstance(extra, dict)
     assert extra["DXVK_CONFIG"] == "[H1Z1.exe];dxgi.maxFrameRate=144"
@@ -367,7 +375,7 @@ def test_the_overlay_and_a_frame_rate_limit_share_the_games_section(
 ) -> None:
     seen = _wire(monkeypatch, tmp_path, "")
     monkeypatch.setenv("DXVK_CONFIG", "dxvk.maxFrameLatency=1")
-    _launch(hud="fps", max_fps=60)
+    _launch(LaunchOptions(hud="fps", max_fps=60))
     extra = seen["extra_env"]
     assert isinstance(extra, dict)
     assert extra["DXVK_CONFIG"] == (
@@ -381,7 +389,7 @@ def test_vsync_is_overridden_for_the_game_only(
 ) -> None:
     seen = _wire(monkeypatch, tmp_path, "")
     monkeypatch.delenv("DXVK_CONFIG", raising=False)
-    _launch(vsync=interval)
+    _launch(LaunchOptions(vsync=interval))
     extra = seen["extra_env"]
     assert isinstance(extra, dict)
     # Including 0, which turns vsync off: it must not be mistaken for unset.
@@ -404,7 +412,7 @@ def test_everything_asked_for_shares_the_games_section(
 ) -> None:
     seen = _wire(monkeypatch, tmp_path, "")
     monkeypatch.delenv("DXVK_CONFIG", raising=False)
-    _launch(hud="fps", max_fps=144, vsync=0)
+    _launch(LaunchOptions(hud="fps", max_fps=144, vsync=0))
     extra = seen["extra_env"]
     assert isinstance(extra, dict)
     assert extra["DXVK_CONFIG"] == (
@@ -490,7 +498,7 @@ def test_allowing_any_proton_is_passed_to_the_check(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     seen = _wire(monkeypatch, tmp_path, "")
-    _launch(allow_any_proton=True)
+    _launch(LaunchOptions(allow_any_proton=True))
     checks = seen["proton_checks"]
     assert isinstance(checks, list)
     assert checks[0]["allow_any"] is True
@@ -512,8 +520,8 @@ def test_tpm_that_cannot_be_used_stops_the_launch_before_anything_else(
     _patch(monkeypatch, "install_launcher", must_not_run)
     _patch(monkeypatch, "process", must_not_run)
     with caplog.at_level("ERROR"):
-        assert _launch(tpm=True) == 1
-        assert _launch(tpm_endorsement=True) == 1
+        assert _launch(LaunchOptions(tpm=True)) == 1
+        assert _launch(LaunchOptions(tpm_endorsement=True)) == 1
     assert "--tpm" in caplog.text
 
 
@@ -537,7 +545,7 @@ def test_a_tpm_that_fails_to_set_up_stops_the_launch(
         pytest.fail("the launcher must not start without a working TPM")
 
     _patch(monkeypatch, "game_process", must_not_start)
-    assert _launch(tpm=True) == 1
+    assert _launch(LaunchOptions(tpm=True)) == 1
 
 
 def test_prepare_reports_a_failed_set_up_as_an_error(
@@ -556,7 +564,7 @@ def test_prepare_reports_a_failed_set_up_as_an_error(
     _patch(monkeypatch, "process", lambda *_a, **_k: Failing())
     with caplog.at_level("ERROR"):
         ok = ShortcutLaunch(
-            object(), _SESSION, _STEAM_COMMAND  # type: ignore[arg-type]
+            bare_steam(), _SESSION, _STEAM_COMMAND
         ).prepare_tpm(endorsement=False)
     assert ok is False
     assert "--tpm" in caplog.text
@@ -564,11 +572,9 @@ def test_prepare_reports_a_failed_set_up_as_an_error(
 
 
 def _shortcut(
-    session: CompatSession, command: list[str], steam: object = None
+    session: CompatSession, command: list[str], steam: Steam | None = None
 ) -> ShortcutLaunch:
-    return ShortcutLaunch(
-        steam or object(), session, command  # type: ignore[arg-type]
-    )
+    return ShortcutLaunch(steam or bare_steam(), session, command)
 
 
 def _steam_launch(tmp_path: Path) -> tuple[CompatSession, list[str]]:
@@ -668,13 +674,16 @@ def test_the_game_runs_as_z1_with_its_library_mounted(
     session, command = _steam_launch(tmp_path)
     library = tmp_path / "library"
 
-    class FakeSteam:
+    class WithLibrary(Steam):
         def game_library_path(self, *, game_id: str) -> Path:
             assert game_id == rotk_launcher.GAME_ID
             return library
 
+    steam = WithLibrary(
+        location=make_location(tmp_path), compatibility_tools=[]
+    )
     monkeypatch.setenv("STEAM_COMPAT_MOUNTS", "/already")
-    launch = ShortcutLaunch(FakeSteam(), session, command)  # type: ignore[arg-type]
+    launch = ShortcutLaunch(steam, session, command)
     process = launch.game_process(extra_env={"EXTRA": "1"})
     assert process.env is not None
     assert process.env["STEAM_COMPAT_MOUNTS"] == f"/already:{library}"
@@ -682,64 +691,79 @@ def test_the_game_runs_as_z1_with_its_library_mounted(
     assert process.command_line[-1] == str(launch.app_path)
 
 
+@dataclass
+class _Ensured:
+    """A call of `ShortcutManager.ensure`."""
+
+    spec: ShortcutSpec
+    assume_yes: bool
+    launch: bool
+
+
+def _record_ensures(monkeypatch: pytest.MonkeyPatch) -> list[_Ensured]:
+    """Has the shortcut manager only record what it is asked for."""
+    calls: list[_Ensured] = []
+
+    def fake_ensure(
+        _self: ShortcutManager,
+        spec: ShortcutSpec,
+        *,
+        assume_yes: bool = False,
+        launch: bool = True,
+    ) -> int:
+        calls.append(_Ensured(spec, assume_yes, launch))
+        return 1
+
+    monkeypatch.setattr(ShortcutManager, "ensure", fake_ensure)
+    return calls
+
+
 def test_without_steams_command_the_launch_adds_the_shortcut_to_steam(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _wire(monkeypatch, tmp_path, "")
-    calls: list[dict[str, object]] = []
-
-    def fake_ensure(steam: object, **kwargs: object) -> int:
-        calls.append({"steam": steam, **kwargs})
-        return 1
-
-    monkeypatch.setattr(steam_shortcuts, "ensure_shortcut", fake_ensure)
+    calls = _record_ensures(monkeypatch)
     monkeypatch.setattr(
         rotk_launcher, "_launcher_command", lambda: ["/bin/sul"]
     )
-    steam = SimpleNamespace(location=SimpleNamespace(root=tmp_path))
+    steam = bare_steam(tmp_path)
     assert (
-        rotk_launcher.launch(
-            steam=steam,  # type: ignore[arg-type]
-            options=LaunchOptions(
+        rotk_launcher.RotkLauncher(LinuxHost(), steam).launch(
+            LaunchOptions(
                 shortcut_options=["--max-fps", "150"], assume_yes=True
-            ),
+            )
         )
         == 0
     )
     (call,) = calls
-    assert call["steam"] is steam
-    assert call["name"] == rotk_launcher.SHORTCUT_NAME
-    assert call["program"] == ["/bin/sul"]
-    assert call["mode"] == "rotk-launcher"
-    assert call["options"] == ["--max-fps", "150"]
-    assert call["launch"] is True
-    assert call["icon"] == rotk_launcher.icon_path()
-    assert call["assume_yes"] is True
+    spec = call.spec
+    assert spec.name == rotk_launcher.SHORTCUT_NAME
+    assert spec.program == ["/bin/sul"]
+    assert spec.mode == "rotk-launcher"
+    assert spec.options == ["--max-fps", "150"]
+    assert isinstance(spec.style, WrapperStyle)
+    assert spec.icon == rotk_launcher.icon_path()
+    assert call.launch is True
+    assert call.assume_yes is True
 
 
 def test_the_shortcut_is_not_started_if_that_is_declined(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _wire(monkeypatch, tmp_path, "")
-    calls: list[dict[str, object]] = []
-
-    def fake_ensure(_steam: object, **kwargs: object) -> int:
-        calls.append(kwargs)
-        return 1
-
-    monkeypatch.setattr(steam_shortcuts, "ensure_shortcut", fake_ensure)
-    steam = SimpleNamespace(location=SimpleNamespace(root=tmp_path))
+    calls = _record_ensures(monkeypatch)
+    steam = bare_steam(tmp_path)
     assert (
-        rotk_launcher.launch(
-            steam=steam,  # type: ignore[arg-type]
-            options=LaunchOptions(start_shortcut=False),
+        rotk_launcher.RotkLauncher(LinuxHost(), steam).launch(
+            LaunchOptions(start_shortcut=False)
         )
         == 0
     )
-    assert calls[0]["launch"] is False
-    assert calls[0]["name"] == rotk_launcher.SHORTCUT_NAME
+    spec = calls[0].spec
+    assert calls[0].launch is False
+    assert spec.name == rotk_launcher.SHORTCUT_NAME
     # The banner of Z1 Battle Royale, if Steam has one
-    assert calls[0]["artwork"] == (
+    assert spec.artwork == (
         tmp_path / "appcache" / "librarycache" / rotk_launcher.GAME_ID
     )
 
@@ -748,11 +772,64 @@ def test_a_shortcut_that_could_not_be_added_is_a_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _wire(monkeypatch, tmp_path, "")
+
+    def refuse(*_a: object, **_k: object) -> int:
+        msg = "Steam says no"
+        raise SteamError(msg)
+
+    monkeypatch.setattr(ShortcutManager, "ensure", refuse)
+    steam = bare_steam(tmp_path)
+    with pytest.raises(SteamError, match="Steam says no"):
+        rotk_launcher.RotkLauncher(LinuxHost(), steam).launch()
+
+
+def _windows_shortcut_calls(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> list[_Ensured]:
     monkeypatch.setattr(
-        steam_shortcuts, "ensure_shortcut", lambda *_a, **_k: None
+        WindowsHost, "steam_root", property(lambda _s: tmp_path)
     )
-    steam = SimpleNamespace(location=SimpleNamespace(root=tmp_path))
-    assert rotk_launcher.launch(steam=steam) == 1  # type: ignore[arg-type]
+    monkeypatch.setattr(rotk_launcher, "XDG_DATA_ROOT", tmp_path / "data")
+    monkeypatch.setattr(
+        rotk_launcher, "_launcher_command", lambda: ["C:\\sul\\sul.exe"]
+    )
+    return _record_ensures(monkeypatch)
+
+
+def test_on_windows_run_on_its_own_it_adds_a_shortcut_that_runs_it_directly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _windows_shortcut_calls(monkeypatch, tmp_path)
+    assert rotk_launcher.RotkLauncher(WindowsHost()).launch() == 0
+    spec = calls[0].spec
+    assert isinstance(spec.style, DirectStyle)
+    assert spec.style.compat_tool() is None
+    assert spec.program == ["C:\\sul\\sul.exe"]
+
+
+def test_on_windows_started_by_steam_it_installs_and_runs_the_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ran: list[bool] = []
+
+    def run(_self: object, options: LaunchOptions) -> int:
+        ran.append(options.run_from_steam)
+        return 0
+
+    monkeypatch.setattr(WindowsLaunch, "run", run)
+    code = rotk_launcher.RotkLauncher(WindowsHost()).launch(
+        LaunchOptions(run_from_steam=True)
+    )
+    assert code == 0
+    assert ran == [True]
+
+
+def test_the_windows_launcher_is_where_the_installer_puts_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
+    launch = WindowsLaunch(NativeWindows())
+    assert launch.app_path == tmp_path / "ROTK Launcher" / "ROTK Launcher.exe"
 
 
 def test_the_launchers_mark_is_saved_for_the_shortcut(
@@ -840,9 +917,11 @@ def test_everything_goes_to_the_prefix_of_the_shortcut_whatever_its_id(
     # The Visual C++ runtime is installed with processes of that prefix too
     started: list[Process] = []
 
-    def ensure_current(wine_prefix: WinePrefix, *, run: object) -> None:
+    def ensure_current(
+        wine_prefix: WinePrefix, *, run: Callable[[list[str]], Process]
+    ) -> None:
         assert wine_prefix == session.wine_prefix
-        started.append(run(["vc_redist.x64.exe"]))  # type: ignore[operator]
+        started.append(run(["vc_redist.x64.exe"]))
 
     monkeypatch.setattr(vc_runtime, "ensure_current", ensure_current)
     launch.ensure_runtime()
@@ -858,42 +937,60 @@ def test_everything_goes_to_the_prefix_of_the_shortcut_whatever_its_id(
     assert not (compatdata / rotk_launcher.GAME_ID).exists()
 
 
-def test_a_process_that_would_not_run_in_the_prefix_is_never_started(
-    tmp_path: Path,
-) -> None:
-    class Elsewhere:
-        def process_in_prefix(
-            self, command_line: list[str], **_: object
-        ) -> Process:
-            return Process(
-                command_line=command_line,
-                env={"WINEPREFIX": str(tmp_path / "somewhere" / "pfx")},
-            )
+class _Elsewhere(Steam):
+    """A Steam that makes processes for a prefix that is not the launch's."""
 
-    launch = ShortcutLaunch(
-        Elsewhere(), _SESSION, _STEAM_COMPAT_COMMAND  # type: ignore[arg-type]
+    @override
+    def process_in_prefix(
+        self,
+        command_line: list[str],
+        *,
+        game_id: str,
+        cwd: Path | None = None,
+        session: CompatSession | None = None,
+    ) -> Process:
+        return Process(
+            command_line=command_line, env={"WINEPREFIX": "/somewhere/pfx"}
+        )
+
+
+class _NoPrefix(Steam):
+    """A Steam that makes processes that have no prefix at all."""
+
+    @override
+    def process_in_prefix(
+        self,
+        command_line: list[str],
+        *,
+        game_id: str,
+        cwd: Path | None = None,
+        session: CompatSession | None = None,
+    ) -> Process:
+        return Process(command_line=command_line, env=None)
+
+
+def test_a_process_that_would_not_run_in_the_prefix_is_never_started() -> None:
+    steam = _Elsewhere(
+        location=make_location(Path("/steam-for-the-test")),
+        compatibility_tools=[],
     )
+    launch = ShortcutLaunch(steam, _SESSION, _STEAM_COMMAND)
     with pytest.raises(RuntimeError, match=r"/compat/1/pfx"):
         launch.process(["C:\\setup.exe"])
 
 
-_STEAM_COMPAT_COMMAND = _STEAM_COMMAND
-
-
 def test_a_process_without_the_prefix_at_all_is_refused_too() -> None:
-    class Bare:
-        def process_in_prefix(
-            self, command_line: list[str], **_: object
-        ) -> Process:
-            return Process(command_line=command_line, env=None)
-
-    launch = ShortcutLaunch(Bare(), _SESSION, _STEAM_COMMAND)  # type: ignore[arg-type]
+    steam = _NoPrefix(
+        location=make_location(Path("/steam-for-the-test")),
+        compatibility_tools=[],
+    )
+    launch = ShortcutLaunch(steam, _SESSION, _STEAM_COMMAND)
     with pytest.raises(RuntimeError, match="in the prefix of the launch"):
         launch.process(["x.exe"])
 
 
 def test_the_launcher_app_is_in_the_program_files_of_the_prefix() -> None:
-    launch = ShortcutLaunch(object(), _SESSION, _STEAM_COMMAND)  # type: ignore[arg-type]
+    launch = ShortcutLaunch(bare_steam(), _SESSION, _STEAM_COMMAND)
     assert launch.app_path == Path(
         "/compat/1/pfx/drive_c/Program Files/ROTK Launcher/ROTK Launcher.exe"
     )
@@ -960,12 +1057,9 @@ class _InstallRun:
 
     def __call__(self, command_line: list[str]) -> Process:
         self.commands.append(command_line)
-        return cast("Process", self)
+        return FakeProcess(self._finish)
 
-    def start(self) -> _InstallRun:
-        return self
-
-    def wait(self) -> int:
+    def _finish(self) -> int:
         if self.creates:
             self.app.write_text("launcher")
         return self.code

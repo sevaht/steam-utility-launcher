@@ -26,6 +26,7 @@ from steam_utility_launcher.ds2_settings import (
     SettingsBlock,
     SettingsError,
 )
+from steam_utility_launcher.errors import UserError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -61,7 +62,7 @@ PROFILE_ENTRY = 0
 SETTINGS_ENTRY = 22
 
 
-class SaveError(RuntimeError):
+class SaveError(UserError):
     pass
 
 
@@ -132,7 +133,7 @@ def _entries(data: bytes) -> list[_Entry]:
 def _open(data: bytes, entry: _Entry) -> _Opened:
     raw = data[entry.offset : entry.offset + entry.size]
     checksum, body = raw[:_CHECKSUM_LENGTH], raw[_CHECKSUM_LENGTH:]
-    if hashlib.md5(body).digest() != checksum:  # noqa: S324
+    if hashlib.md5(body, usedforsecurity=False).digest() != checksum:
         msg = "an entry's checksum is wrong; the save file is damaged"
         raise SaveError(msg)
     iv = body[:_IV_LENGTH]
@@ -147,7 +148,7 @@ def _seal(opened: _Opened) -> bytes:
     ).encryptor()
     body = opened.iv + encryptor.update(bytes(opened.plain))
     body += encryptor.finalize()
-    return hashlib.md5(body).digest() + body  # noqa: S324
+    return hashlib.md5(body, usedforsecurity=False).digest() + body
 
 
 def _edit_entry(

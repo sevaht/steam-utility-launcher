@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from steam_utility_launcher import application, proton_tools, svt_ge_proton
@@ -9,10 +8,15 @@ from steam_utility_launcher.github_release_updater import Release
 from steam_utility_launcher.steam import Steam
 from steam_utility_launcher.utilities import rotk_launcher
 
+from .steam_helper import make_steam, make_tool
+
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     import pytest
+
+    from steam_utility_launcher.steam import CompatibilityTool
 
 FLAG = "--allow-any-proton"
 TOOL = "SVT-GE-Proton-11"
@@ -29,41 +33,29 @@ def _build_tool(directory: Path, marker: str = "") -> Path:
     return tool
 
 
-class _FakeSteam:
-    def __init__(
-        self,
-        tools_directory: Path,
-        *,
-        chosen: str = "",
-        tools: list[SimpleNamespace] | None = None,
-    ) -> None:
-        self.location = SimpleNamespace(
-            compatibility_tools_dir=tools_directory
-        )
-        self.compatibility_tools = tools or []
-        self._chosen = chosen
-
-    def game_compatibility_tool(self, _game_id: str) -> str:
-        return self._chosen
-
-    def game_tool(self, _game_id: str) -> SimpleNamespace | None:
-        for tool in self.compatibility_tools:
-            if tool.internal_name == self._chosen:
-                return tool
-        return None
+GAME = "433850"
 
 
-def _tool_entry(name: str, directory: Path) -> SimpleNamespace:
-    return SimpleNamespace(internal_name=name, install_path=directory)
+def _steam(
+    root: Path, *, chosen: str = "", tools: Sequence[CompatibilityTool] = ()
+) -> Steam:
+    """A Steam with these tools, set to run the game with `chosen`."""
+    return make_steam(
+        root, tools, tool_choices={GAME: chosen} if chosen else None
+    )
+
+
+def _tool_entry(name: str, directory: Path) -> CompatibilityTool:
+    return make_tool(directory, name)
 
 
 # Whether the game uses it
 
 
-def _ensure(steam: _FakeSteam, *, allow_any: bool = False) -> bool:
+def _ensure(steam: Steam, *, allow_any: bool = False) -> bool:
     return svt_ge_proton.ensure_game_uses(
-        steam,  # type: ignore[arg-type]
-        "433850",
+        steam,
+        GAME,
         game_name="Z1 Battle Royale",
         override_flag=FLAG,
         allow_any=allow_any,
@@ -83,7 +75,7 @@ def test_a_game_on_svt_ge_proton_may_go_on(
 ) -> None:
     checked = _no_update_check(monkeypatch)
     tool = _tool_entry(TOOL, tmp_path)
-    steam = _FakeSteam(tmp_path, chosen=TOOL, tools=[tool])
+    steam = _steam(tmp_path, chosen=TOOL, tools=[tool])
     assert _ensure(steam) is True
     assert checked == [tool]
 
@@ -94,7 +86,7 @@ def test_a_game_on_another_proton_is_refused_and_told_how_to_fix_it(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     _no_update_check(monkeypatch)
-    steam = _FakeSteam(
+    steam = _steam(
         tmp_path,
         chosen="proton_hotfix",
         tools=[_tool_entry("proton_hotfix", tmp_path)],
@@ -115,7 +107,7 @@ def test_it_says_to_choose_it_when_it_is_installed_but_not_chosen(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     _no_update_check(monkeypatch)
-    steam = _FakeSteam(
+    steam = _steam(
         tmp_path,
         chosen="proton_hotfix",
         tools=[
@@ -135,7 +127,7 @@ def test_it_says_to_install_it_when_steam_names_it_but_it_is_missing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     _no_update_check(monkeypatch)
-    steam = _FakeSteam(tmp_path, chosen=TOOL, tools=[])
+    steam = _steam(tmp_path, chosen=TOOL, tools=[])
     with caplog.at_level(logging.ERROR):
         assert _ensure(steam) is False
     assert "set to SVT-GE-Proton-11 in Steam, but that isn't installed" in (
@@ -151,7 +143,7 @@ def test_a_chosen_tool_that_is_gone_cannot_be_allowed_either(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     _no_update_check(monkeypatch)
-    steam = _FakeSteam(
+    steam = _steam(
         tmp_path, chosen="proton_old", tools=[_tool_entry(TOOL, tmp_path)]
     )
     with caplog.at_level(logging.ERROR):
@@ -170,7 +162,7 @@ def test_a_game_with_no_tool_chosen_names_steams_default(
 ) -> None:
     _no_update_check(monkeypatch)
     with caplog.at_level(logging.ERROR):
-        assert _ensure(_FakeSteam(tmp_path)) is False
+        assert _ensure(_steam(tmp_path)) is False
     assert "SVT-GE-Proton isn't installed" in caplog.text
     assert "Steam's default anyway" in caplog.text
 
@@ -181,7 +173,7 @@ def test_any_proton_can_be_allowed_with_a_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     checked = _no_update_check(monkeypatch)
-    steam = _FakeSteam(
+    steam = _steam(
         tmp_path,
         chosen="proton_hotfix",
         tools=[_tool_entry("proton_hotfix", tmp_path)],
@@ -196,7 +188,7 @@ def test_any_proton_can_be_allowed_with_a_warning(
 # The update hint
 
 
-def _tool_at(tmp_path: Path, marker: str) -> SimpleNamespace:
+def _tool_at(tmp_path: Path, marker: str) -> CompatibilityTool:
     return _tool_entry(TOOL, _build_tool(tmp_path / "installed", marker))
 
 
@@ -216,8 +208,8 @@ def test_a_newer_release_is_mentioned_once_a_day(
     tool = _tool_at(tmp_path, TAG)
 
     with caplog.at_level(logging.WARNING):
-        svt_ge_proton.warn_if_update_available(tool)  # type: ignore[arg-type]
-        svt_ge_proton.warn_if_update_available(tool)  # type: ignore[arg-type]
+        svt_ge_proton.warn_if_update_available(tool)
+        svt_ge_proton.warn_if_update_available(tool)
     assert calls == [1]  # the second one was within the day
     assert caplog.text.count("update is available") == 1
     assert f'"{TAG}" -> "svt-GE-Proton11-12"' in caplog.text
@@ -234,9 +226,7 @@ def test_no_update_hint_when_it_is_the_latest(
         proton_tools, "find_release", lambda _s, _t="": Release(tag=TAG)
     )
     with caplog.at_level(logging.WARNING):
-        svt_ge_proton.warn_if_update_available(
-            _tool_at(tmp_path, TAG)  # type: ignore[arg-type]
-        )
+        svt_ge_proton.warn_if_update_available(_tool_at(tmp_path, TAG))
     assert caplog.text == ""
 
 
@@ -253,9 +243,7 @@ def test_a_failed_update_check_does_not_stop_anything(
 
     monkeypatch.setattr(proton_tools, "find_release", offline)
     with caplog.at_level(logging.WARNING):
-        svt_ge_proton.warn_if_update_available(
-            _tool_at(tmp_path, TAG)  # type: ignore[arg-type]
-        )
+        svt_ge_proton.warn_if_update_available(_tool_at(tmp_path, TAG))
     assert caplog.text == ""
 
 
@@ -268,14 +256,16 @@ def test_the_flag_that_allows_any_proton_reaches_the_launcher(
     seen: list[bool] = []
     monkeypatch.setattr("sys.platform", "linux")
     monkeypatch.setattr(
-        Steam, "from_detection", classmethod(lambda _cls: object())
+        Steam, "from_detection", classmethod(lambda _cls, _host=None: object())
     )
 
-    def launch(**kwargs: rotk_launcher.LaunchOptions) -> int:
-        seen.append(kwargs["options"].allow_any_proton)
+    def launch(
+        _self: object, options: rotk_launcher.LaunchOptions, **_k: object
+    ) -> int:
+        seen.append(options.allow_any_proton)
         return 0
 
-    monkeypatch.setattr(rotk_launcher, "launch", launch)
+    monkeypatch.setattr(rotk_launcher.RotkLauncher, "launch", launch)
     application.main(["rotk-launcher"])
     application.main(["rotk-launcher", FLAG])
     assert seen == [False, True]

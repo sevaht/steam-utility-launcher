@@ -6,19 +6,18 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import time
-from collections.abc import Callable, KeysView, Mapping, Sequence
 from dataclasses import dataclass, field
-from enum import StrEnum
 from pathlib import Path
-from typing import Union
+from typing import TYPE_CHECKING, Protocol
 
-import vdf  # type: ignore[import-untyped]
-
+from steam_utility_launcher.errors import UserError
+from steam_utility_launcher.host import Host
+from steam_utility_launcher.keyvalues import KeyValuesError, Section
 from steam_utility_launcher.wine_prefix import WinePrefix
 
-VDFTree = Mapping[str, Union[str, "VDFTree"]]
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +28,7 @@ _SHUTDOWN_POLL_SECONDS = 1.0
 _NON_STEAM_GAME_FLAG = 0x02000000
 
 
-class SteamError(RuntimeError):
+class SteamError(UserError):
     """Steam's files or client don't allow what was asked; the message says
     why."""
 
@@ -38,6 +37,20 @@ def _wine_beside(proton_script: Path) -> Path | None:
     """Proton's own `wine`, which sits beside its `proton` script, or None."""
     wine = proton_script.parent / "files" / "bin" / "wine"
     return wine if wine.exists() else None
+
+
+class RunningProcess(Protocol):
+    """What this program asks of a program it has started, which is what a
+    `subprocess.Popen` offers."""
+
+    @property
+    def pid(self) -> int: ...
+
+    def wait(self, timeout: float | None = None) -> int: ...
+
+    def poll(self) -> int | None: ...
+
+    def terminate(self) -> None: ...
 
 
 @dataclass
@@ -53,8 +66,6 @@ class Process:
     def _registry_runner(self) -> list[str]:
         if not self.prefix_runner:
             return []
-        if len(self.prefix_runner) == 1 and self.prefix_runner[0] == "wine":
-            return ["wine"]
         proton_binary = Path(self.prefix_runner[0])
         if proton_binary.name == "proton":
             wine_binary = _wine_beside(proton_binary)
@@ -75,7 +86,7 @@ class Process:
             key,
         ]
         try:
-            result = subprocess.run(  # noqa: S603
+            result = subprocess.run(
                 command,
                 check=False,
                 env=self.env,
@@ -114,9 +125,7 @@ class Process:
                 "/f",
             ]
             try:
-                subprocess.run(  # noqa: S603
-                    command, check=True, env=self.env, timeout=15
-                )
+                subprocess.run(command, check=True, env=self.env, timeout=15)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 logger.warning(
                     "Failed to set Wine override %s=%s; continuing launch",
@@ -137,9 +146,7 @@ class Process:
                 "/f",
             ]
             try:
-                subprocess.run(  # noqa: S603
-                    command, check=False, env=self.env, timeout=15
-                )
+                subprocess.run(command, check=False, env=self.env, timeout=15)
             except subprocess.TimeoutExpired:
                 logger.warning(
                     "Timed out unsetting Wine override %s; continuing launch",
@@ -151,7 +158,7 @@ class Process:
             msg = "command_line must be a non-empty list."
             raise AssertionError(msg)
 
-    def start(self) -> subprocess.Popen[bytes]:
+    def start(self) -> RunningProcess:
         if self.utility_binary_name is not None:
             utility_path = Path(self.utility_binary_name)
             is_path_like = (
@@ -171,68 +178,12 @@ class Process:
         command_line = list(self.command_line)
         logger.info(f"Starting subprocess: {command_line}")
         self._apply_registry_overrides()
-        return subprocess.Popen(  # noqa: S603
+        return subprocess.Popen(
             command_line,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             cwd=self.cwd,
             env=self.env,
         )
-
-
-class Verb(StrEnum):
-    RUN = "run"
-    WAIT_FOR_EXIT_AND_RUN = "waitforexitandrun"
-
-
-@dataclass
-class VDFNode:
-    tree: VDFTree
-
-    @classmethod
-    def from_path(cls, path: Path) -> VDFNode:
-        with path.open(encoding="utf-8") as handle:
-            return cls(tree=vdf.load(handle))
-
-    @classmethod
-    def from_path_binary(cls, path: Path) -> VDFNode:
-        with path.open("rb") as handle:
-            return cls(tree=vdf.binary_load(handle))
-
-    def keys(self) -> KeysView[str]:
-        return self.tree.keys()
-
-    def section(self, keys: Sequence[str]) -> VDFNode:
-        if isinstance(keys, str):
-            keys = [keys]
-        tree: VDFTree = self.tree
-        for key in keys:
-            inner_tree = tree[key]
-            if isinstance(inner_tree, str):
-                msg = f"Expected object, got str: {key}={inner_tree}"
-                raise TypeError(msg)
-            tree = inner_tree
-        if tree is self.tree:
-            return self
-        return VDFNode(tree=tree)
-
-    def __getitem__(self, keys: Sequence[str]) -> str:
-        keys = [keys] if isinstance(keys, str) else list(keys)
-        if not keys:
-            msg = "no keys passed"
-            raise ValueError(msg)
-        leaf = keys.pop()
-        section = self.section(keys=keys)
-        value = section.tree[leaf]
-        if not isinstance(value, str):
-            msg = f"value expected to be str, but is {type(value)}"
-            raise TypeError(msg)
-        return value
-
-    def get(self, keys: Sequence[str], default: str = "") -> str:
-        try:
-            return self[keys]
-        except KeyError:
-            return default
 
 
 _PROTON_PATTERN = re.compile(r"(?i)proton")
@@ -272,12 +223,12 @@ class CompatibilityTool:
             internal_name = install_path.name.lower().replace(" ", "_")
         if not display_name:
             display_name = install_path.name
-        manifest = VDFNode.from_path(manifest_vdf).section("manifest")
-        manifest_version = manifest["version"]
+        manifest = Section.from_text_file(manifest_vdf).section("manifest")
+        manifest_version = manifest.string("version")
         if manifest_version != "2":
             msg = f"Only supports manifest v2, but found v{manifest_version}"
             raise NotImplementedError(msg)
-        command_line_template = shlex.split(manifest["commandline"])
+        command_line_template = shlex.split(manifest.string("commandline"))
         if not command_line_template:
             msg = "Couldn't retrieve command line!"
             raise ValueError(msg)
@@ -304,19 +255,19 @@ class CompatibilityTool:
         cls, tool_vdf: Path
     ) -> list[CompatibilityTool]:
         tools: list[CompatibilityTool] = []
-        compat_tools = VDFNode.from_path(tool_vdf).section(
-            ["compatibilitytools", "compat_tools"]
+        compat_tools = Section.from_text_file(tool_vdf).section(
+            "compatibilitytools", "compat_tools"
         )
         vdf_dir = tool_vdf.parent
-        for internal_name in compat_tools.tree:
-            tool_section = compat_tools.section(internal_name)
-            install_path = vdf_dir / tool_section["install_path"]
+        for internal_name, tool_section in compat_tools.subsections():
+            install_path = vdf_dir / tool_section.string("install_path")
             manifest_vdf = install_path / "toolmanifest.vdf"
             tools.append(
                 cls.from_toolmanifest_vdf(
                     manifest_vdf,
                     internal_name=internal_name,
-                    display_name=tool_section.get("display_name"),
+                    display_name=tool_section.find_string("display_name")
+                    or "",
                 )
             )
         return tools
@@ -325,9 +276,10 @@ class CompatibilityTool:
     def manifest_path(self) -> Path:
         return self.install_path / "toolmanifest.vdf"
 
-    def command_line(self, *, verb: Verb = Verb.RUN) -> list[str]:
+    def command_line(self) -> list[str]:
+        """What runs a program with this tool, up to the program."""
         return [str(self.binary_path)] + [
-            tool_arg if tool_arg != "%verb%" else str(verb)
+            tool_arg if tool_arg != "%verb%" else "run"
             for tool_arg in self.binary_argument_template
         ]
 
@@ -338,40 +290,25 @@ class CompatibilityTool:
         return _wine_beside(self.binary_path)
 
     def launch_command(
-        self, command_line: list[str], *, via_script: bool = False
+        self, command_line: list[str]
     ) -> tuple[list[str], list[str]]:
         """What to run, and what to run `reg` with, to start `command_line` in
-        a prefix with this tool: Proton's bare `wine`, or with `via_script` its
-        own `proton` script, as Steam starts a game."""
+        a prefix with this tool: Proton's bare `wine`, or the tool's own
+        command for a tool that has none."""
         proton_wine = self.wine_binary
         if proton_wine is not None:
             prefix_runner = [str(proton_wine)]
-            if via_script:
-                # The verb Steam launches games with: first waits for any
-                # earlier session in the prefix to end. (`reg` edits still
-                # use the bare wine; see Process.)
-                logger.info(
-                    "Starting through Proton; this first waits for any"
-                    " earlier Wine session in the prefix to exit."
-                )
-                return prefix_runner, [
-                    *self.command_line(verb=Verb.WAIT_FOR_EXIT_AND_RUN),
-                    *command_line,
-                ]
             return prefix_runner, [str(proton_wine), *command_line]
-        prefix_runner = self.command_line(verb=Verb.RUN)
+        prefix_runner = self.command_line()
         return prefix_runner, prefix_runner + command_line
 
-    def add_environment(
-        self, env: dict[str, str], prefix: WinePrefix, *, via_script: bool
-    ) -> None:
+    def add_environment(self, env: dict[str, str], prefix: WinePrefix) -> None:
         """The variables a process needs to run in `prefix` with this tool."""
         env["PROTON_DIR"] = str(self.binary_path.parent)
-        if not via_script:  # the script sets these itself
-            existing = env.get("WINEDLLOVERRIDES", "")
-            env["WINEDLLOVERRIDES"] = ";".join(
-                part for part in (prefix.dll_overrides(), existing) if part
-            )
+        existing = env.get("WINEDLLOVERRIDES", "")
+        env["WINEDLLOVERRIDES"] = ";".join(
+            part for part in (prefix.dll_overrides(), existing) if part
+        )
 
 
 @dataclass(frozen=True)
@@ -412,21 +349,12 @@ class SteamLocation:
     system_config_dirs: list[Path]
 
     @classmethod
-    def from_detection(cls) -> SteamLocation:
-        if not sys.platform.startswith("linux"):
-            msg = "currently only implemented for linux"
-            raise NotImplementedError(msg)
-        xdg_data_home = Path(
-            os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
+    def from_detection(cls, host: Host | None = None) -> SteamLocation:
+        host = host or Host.current()
+        return SteamLocation(
+            root=host.steam_root,
+            system_config_dirs=host.system_steam_config_dirs,
         )
-        root = xdg_data_home / "Steam"
-        system_config_dirs = [
-            Path(path) / "steam"
-            for path in os.environ.get(
-                "XDG_DATA_DIRS", "/usr/local/share:/usr/share"
-            ).split(":")
-        ]
-        return SteamLocation(root=root, system_config_dirs=system_config_dirs)
 
     @property
     def config_dirs(self) -> list[Path]:
@@ -450,121 +378,27 @@ class SteamLocation:
     def library_folders_vdf(self) -> Path:
         return self.steamapps / "libraryfolders.vdf"
 
-    def client_program(self) -> str:
-        """What starts the Steam client: `steam` if it is on the PATH, else
-        the script in Steam's own folder."""
-        return shutil.which("steam") or str(self.root / "steam.sh")
-
-    @staticmethod
-    def is_client_running() -> bool:
-        """Whether this user has a Steam client running."""
-        uid = os.getuid()
-        for entry in Path("/proc").iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                if (
-                    entry / "comm"
-                ).read_text().strip() == "steam" and entry.stat().st_uid == uid:
-                    return True
-            except OSError:
-                continue
-        return False
-
-    def shut_down_client(self) -> None:
-        """Asks Steam to exit and waits until it has."""
-        logger.info("Closing Steam...")
-        try:
-            subprocess.run(  # noqa: S603
-                [self.client_program(), "-shutdown"], check=False, timeout=30
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            msg = f"Could not tell Steam to close: {error}"
-            raise SteamError(msg) from error
-        deadline = time.monotonic() + _SHUTDOWN_WAIT_SECONDS
-        while self.is_client_running():
-            if time.monotonic() > deadline:
-                msg = "Steam did not close; close it yourself and try again."
-                raise SteamError(msg)
-            time.sleep(_SHUTDOWN_POLL_SECONDS)
-
-    def close_client_for_change(
-        self, ask: Callable[[str], str], *, assume_yes: bool, why: str
-    ) -> bool:
-        """Gets Steam out of the way of a change to its files, if it is running
-        (Steam saves its settings when it exits, which would undo the change).
-        It is closed after asking, unless `assume_yes`. Returns whether it was
-        closed."""
-        if not self.is_client_running():
-            return False
-        if not assume_yes:
-            try:
-                answer = ask(
-                    f"Steam has to be closed to {why} (it saves its settings"
-                    " when it exits, which would undo the change). Close"
-                    " Steam now? [y/N] "
-                )
-            except EOFError:
-                answer = ""
-            if answer.strip().lower() not in {"y", "yes"}:
-                msg = f"Close Steam, then run this again to {why}."
-                raise SteamError(msg)
-        self.shut_down_client()
-        return True
-
-    def start_client(self) -> None:
-        """Starts Steam, which runs on its own, not as a child of this
-        program."""
-        try:
-            subprocess.Popen(  # noqa: S603
-                [self.client_program()],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError as error:
-            msg = f"Could not start Steam: {error}"
-            raise SteamError(msg) from error
-
-    def launch_game(self, app_id: int) -> None:
-        """Has Steam start the non-Steam game, starting Steam first if it
-        isn't running (the game then starts once it is up). Steam runs on its
-        own, not as a child of this program."""
-        game_id = (app_id << 32) | _NON_STEAM_GAME_FLAG
-        try:
-            subprocess.Popen(  # noqa: S603
-                [self.client_program(), f"steam://rungameid/{game_id}"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError as error:
-            msg = f"Could not start the game through Steam: {error}"
-            raise SteamError(msg) from error
-
     def account_steam_id(self) -> int:
         """The 64 bit Steam id of the account in use: the one that last signed
         in (or the only one there is)."""
         try:
-            users = vdf.load(
-                (self.root / "config" / "loginusers.vdf").open(
-                    encoding="utf-8"
-                )
-            )["users"]
-        except (OSError, KeyError, SyntaxError) as error:
+            users = Section.from_text_file(
+                self.root / "config" / "loginusers.vdf"
+            ).section("users")
+        except (OSError, KeyValuesError) as error:
             msg = f"Could not read Steam's accounts: {error}"
             raise SteamError(msg) from error
         recent = [
             steam_id
-            for steam_id, user in users.items()
+            for steam_id, user in users.subsections()
             if any(
                 key.lower() == "mostrecent" and value == "1"
-                for key, value in user.items()
+                for key, value in user.strings()
             )
         ]
-        candidates = recent or list(users)
+        candidates = recent or [
+            steam_id for steam_id, _ in users.subsections()
+        ]
         if len(candidates) != 1:
             msg = (
                 "Could not tell which Steam account is in use; sign in to the"
@@ -585,22 +419,101 @@ class SteamLocation:
         if not vdf_path.exists():
             return paths
         try:
-            libraryfolders = VDFNode.from_path(vdf_path).section(
+            libraryfolders = Section.from_text_file(vdf_path).section(
                 "libraryfolders"
             )
-        except (KeyError, TypeError, OSError):
+        except (KeyValuesError, OSError):
             logger.warning(
                 f"Exception when loading {vdf_path}:", exc_info=True
             )
             return paths
-        for key in libraryfolders.tree:
-            try:
-                path = Path(libraryfolders.section(key)["path"])
-            except (KeyError, TypeError):
+        for _, folder in libraryfolders.subsections():
+            folder_path = folder.find_string("path")
+            if folder_path is None:
                 continue
+            path = Path(folder_path)
             if path not in paths:
                 paths.append(path)
         return paths
+
+
+class SteamClient:
+    """The running Steam client of one installation: whether it is running, and
+    closing, starting and having it start a game."""
+
+    def __init__(self, location: SteamLocation, host: Host) -> None:
+        self.location = location
+        self.host = host
+
+    def _command(self) -> list[str]:
+        return self.host.steam_client_command(self.location.root)
+
+    def is_running(self) -> bool:
+        """Whether this user has a Steam client running."""
+        return self.host.processes.is_running(self.host.steam_process_name)
+
+    def shut_down(self) -> None:
+        """Asks Steam to exit and waits until it has."""
+        logger.info("Closing Steam...")
+        try:
+            subprocess.run(
+                [*self._command(), "-shutdown"], check=False, timeout=30
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            msg = f"Could not tell Steam to close: {error}"
+            raise SteamError(msg) from error
+        deadline = time.monotonic() + _SHUTDOWN_WAIT_SECONDS
+        while self.is_running():
+            if time.monotonic() > deadline:
+                msg = "Steam did not close; close it yourself and try again."
+                raise SteamError(msg)
+            time.sleep(_SHUTDOWN_POLL_SECONDS)
+
+    def close_for_change(
+        self, ask: Callable[[str], str], *, assume_yes: bool, why: str
+    ) -> bool:
+        """Gets Steam out of the way of a change to its files, if it is running
+        (Steam saves its settings when it exits, which would undo the change).
+        It is closed after asking, unless `assume_yes`. Returns whether it was
+        closed."""
+        if not self.is_running():
+            return False
+        if not assume_yes:
+            try:
+                answer = ask(
+                    f"Steam has to be closed to {why} (it saves its settings"
+                    " when it exits, which would undo the change). Close"
+                    " Steam now? [y/N] "
+                )
+            except EOFError:
+                answer = ""
+            if answer.strip().lower() not in {"y", "yes"}:
+                msg = f"Close Steam, then run this again to {why}."
+                raise SteamError(msg)
+        self.shut_down()
+        return True
+
+    def start(self) -> None:
+        """Starts Steam, which runs on its own, not as a child of this
+        program."""
+        try:
+            self.host.spawn_detached(self._command())
+        except OSError as error:
+            msg = f"Could not start Steam: {error}"
+            raise SteamError(msg) from error
+
+    def launch_game(self, app_id: int) -> None:
+        """Has Steam start the non-Steam game, starting Steam first if it
+        isn't running (the game then starts once it is up). Steam runs on its
+        own, not as a child of this program."""
+        game_id = (app_id << 32) | _NON_STEAM_GAME_FLAG
+        try:
+            self.host.spawn_detached(
+                [*self._command(), f"steam://rungameid/{game_id}"]
+            )
+        except OSError as error:
+            msg = f"Could not start the game through Steam: {error}"
+            raise SteamError(msg) from error
 
 
 @dataclass
@@ -608,25 +521,13 @@ class Steam:
     location: SteamLocation
     compatibility_tools: list[CompatibilityTool]
 
-    @classmethod
-    def running_proton_game_id(cls) -> str | None:
-        app_id_var_prefix = b"SteamAppId="
-        for pid_dir in Path("/proc").iterdir():
-            if not pid_dir.name.isdigit():
-                continue
-            try:
-                executable = (pid_dir / "exe").resolve()
-                if executable.name == "wineserver":
-                    for line in (
-                        (pid_dir / "environ").read_bytes().split(b"\0")
-                    ):
-                        if line.startswith(app_id_var_prefix):
-                            return line[len(app_id_var_prefix) :].decode(
-                                "utf-8"
-                            )
-            except (FileNotFoundError, PermissionError, OSError):
-                continue
-        return None
+    @staticmethod
+    def running_proton_game_id(host: Host | None = None) -> str | None:
+        """The Steam app id of the game running in Proton, from the
+        environment of its wineserver."""
+        return (host or Host.current()).processes.environment_variable_of(
+            "wineserver", "SteamAppId"
+        )
 
     @classmethod
     def from_location(cls, location: SteamLocation) -> Steam:
@@ -656,8 +557,8 @@ class Steam:
         )
 
     @classmethod
-    def from_detection(cls) -> Steam:
-        return cls.from_location(SteamLocation.from_detection())
+    def from_detection(cls, host: Host | None = None) -> Steam:
+        return cls.from_location(SteamLocation.from_detection(host))
 
     @staticmethod
     def require(steam: Steam | None) -> Steam:
@@ -685,16 +586,17 @@ class Steam:
         return found
 
     def game_compatibility_tool(self, game_id: str) -> str:
-        steam_section = VDFNode.from_path(self.location.config_vdf).section(
-            ["InstallConfigStore", "Software", "Valve", "Steam"]
-        )
-        try:
-            tool_mapping = steam_section.section("CompatToolMapping")
-        except KeyError:
+        steam_section = Section.from_text_file(
+            self.location.config_vdf
+        ).section("InstallConfigStore", "Software", "Valve", "Steam")
+        tool_mapping = steam_section.find_section("CompatToolMapping")
+        if tool_mapping is None:
             return ""
-        return tool_mapping.get(
-            [game_id, "name"], tool_mapping.get(["0", "name"], "")
-        )
+        # The game's own choice, else the default one (the mapping for "0").
+        name = tool_mapping.find_string(game_id, "name")
+        if name is None:
+            name = tool_mapping.find_string("0", "name")
+        return name or ""
 
     def game_library_path(self, *, game_id: str) -> Path:
         for library in self.location.library_paths:
@@ -765,14 +667,12 @@ class Steam:
         matched_tools = self.matching_compatibility_tools(tool_name)
         return matched_tools[0] if len(matched_tools) == 1 else None
 
-    def process_in_prefix(  # noqa: PLR0913
+    def process_in_prefix(
         self,
         command_line: list[str],
         *,
         game_id: str,
         cwd: Path | None = None,
-        system_wine: bool = False,
-        via_proton_script: bool = False,
         session: CompatSession | None = None,
     ) -> Process:
         """Prepares a process to run in a Proton prefix: the game's, or, given
@@ -780,11 +680,10 @@ class Steam:
         with the tool it runs with (`game_id` is then only what the process
         tells Steam it is, and the library the S: drive is made to show).
 
-        By default Proton's bare `wine` is used, which suits utilities that
-        only need the prefix (and this adds the DLL overrides a game needs).
-        With `via_proton_script` the command goes through Proton's own
-        `proton run`, exactly as Steam would launch it: for something that
-        _is_ the game, so it gets Proton's complete environment.
+        Proton's bare `wine` is used, which suits utilities that only need
+        the prefix (and this adds the DLL overrides a game needs). Something
+        that _is_ the game is run by Steam's own command instead (see
+        `ShortcutLaunch`).
         """
         if not command_line:
             msg = "No command line provided."
@@ -799,18 +698,11 @@ class Steam:
         else:
             prefix = self.game_prefix(game_id=game_id)
             compat_data_path = self.game_compatdata_path(game_id=game_id)
-        if system_wine:
+        tool = self._tool_to_run_with(game_id=game_id, session=session)
+        if tool is not None and tool.is_proton():
             is_wine = True
-            command_line = ["wine", *command_line]
-            prefix_runner = ["wine"]
-        else:
-            tool = self._tool_to_run_with(game_id=game_id, session=session)
-            if tool is not None and tool.is_proton():
-                is_wine = True
-                prefix_runner, command_line = tool.launch_command(
-                    command_line, via_script=via_proton_script
-                )
-                tool.add_environment(env, prefix, via_script=via_proton_script)
+            prefix_runner, command_line = tool.launch_command(command_line)
+            tool.add_environment(env, prefix)
         if is_wine:
             if session is None:  # Proton drops the S: drive of a shortcut
                 prefix.map_drive("s", self.game_library_path(game_id=game_id))

@@ -19,6 +19,8 @@ from steam_utility_launcher.ds2_newsave import new_save, steam_id_text
 from .ds2_save_helper import entry_bytes, unseal
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from steam_utility_launcher.ds2_save import SaveFile
 
 STEAM_ID = 76561197969290206
@@ -139,12 +141,12 @@ def test_a_save_for_another_account_differs_in_its_account_only() -> None:
 
 
 def test_the_ivs_can_be_chosen_to_make_a_save_repeatable() -> None:
-    def ivs() -> object:
+    def ivs() -> Callable[[], bytes]:
         counter = iter(range(1, 100))
         return lambda: bytes([next(counter)]) * 16
 
-    first = new_save(STEAM_ID, make_iv=ivs())  # type: ignore[arg-type]
-    second = new_save(STEAM_ID, make_iv=ivs())  # type: ignore[arg-type]
+    first = new_save(STEAM_ID, make_iv=ivs())
+    second = new_save(STEAM_ID, make_iv=ivs())
     assert first.data == second.data
     assert first.data != new_save(STEAM_ID).data
 

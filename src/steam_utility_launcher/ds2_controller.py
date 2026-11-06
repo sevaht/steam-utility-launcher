@@ -8,11 +8,10 @@ put in place for each kind (see steam_input).
 
 from __future__ import annotations
 
-import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from steam_utility_launcher.games import DS2_SOTFS_ID
-from steam_utility_launcher.steam import SteamError
 from steam_utility_launcher.steam_input import (
     CONTROLLER_TYPES,
     ControllerConfigs,
@@ -30,9 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
 
-    from steam_utility_launcher.steam import Steam
-
-logger = logging.getLogger(__name__)
+    from steam_utility_launcher.steam import SteamClient, SteamLocation
 
 _APP_ID = int(DS2_SOTFS_ID)
 _GAME = "Dark Souls II: Scholar of the First Sin"
@@ -74,25 +71,37 @@ def _print_warnings(warnings: list[str]) -> None:
         print("\n".join(warnings))
 
 
-def run(  # noqa: PLR0913
-    *,
-    steam: Steam,
-    layout_file: Path | None = None,
-    controller_types: Sequence[ControllerType] = CONTROLLER_TYPES,
-    keep_device_choices: bool = False,
-    assume_yes: bool = False,
-    dry_run: bool = False,
-    restart: bool = True,
-    ask: Callable[[str], str] = input,
-) -> int:
-    try:
+@dataclass(frozen=True, kw_only=True)
+class ControllerRequest:
+    """What `ds2-controller` was asked to do."""
+
+    location: SteamLocation
+    client: SteamClient
+    layout_file: Path | None = None
+    controller_types: Sequence[ControllerType] = CONTROLLER_TYPES
+    keep_device_choices: bool = False
+    assume_yes: bool = False
+    dry_run: bool = False
+    restart: bool = True
+    ask: Callable[[str], str] = input
+
+
+class LayoutInstaller:
+    """Has Steam use the bundled controller layout for the game."""
+
+    def __init__(self, request: ControllerRequest) -> None:
+        self.request = request
+
+    def run(self) -> None:
+        """Does what was asked, and says what it did."""
+        request = self.request
+        location = request.location
         base = (
-            ControllerLayout.from_file(layout_file)
-            if layout_file
+            ControllerLayout.from_file(request.layout_file)
+            if request.layout_file
             else ControllerLayout.bundled()
         )
-        layouts = [base.for_type(kind) for kind in controller_types]
-        location = steam.location
+        layouts = [base.for_type(kind) for kind in request.controller_types]
         configs = ControllerConfigs(
             location, int(location.account_directory().name)
         )
@@ -102,7 +111,7 @@ def run(  # noqa: PLR0913
         device_changes, unresolved = plan_device_choices(
             configs, _APP_ID, layouts
         )
-        if keep_device_choices:
+        if request.keep_device_choices:
             unresolved |= {
                 change.path.name: selected_template(
                     read_text(change.path) or "", _APP_ID
@@ -118,30 +127,30 @@ def run(  # noqa: PLR0913
         if not changes:
             print(f"Steam already uses {base.title!r} for {_GAME} ({kinds}).")
             _print_warnings(warnings)
-            return 0
+            return
         report = "\n".join(
             _describe(configs, layouts, devices, c) for c in changes
         )
-        if dry_run:
+        if request.dry_run:
             print(f"{report}\n(dry run: nothing was changed)")
             _print_warnings(warnings)
-            return 0
-        closed = location.close_client_for_change(
-            ask,
-            assume_yes=assume_yes,
+            return
+        closed = request.client.close_for_change(
+            request.ask,
+            assume_yes=request.assume_yes,
             why=f"change {_GAME}'s controller layout",
         )
         backups = write_changes(changes)
-        if closed and restart:
-            location.start_client()
-    except (OSError, ValueError, SteamError) as error:
-        logger.error("Could not set the layout: %s", error)  # noqa: TRY400
-        return 1
-    print(report)
-    if backups:
-        print("Backed up: " + ", ".join(backup.name for backup in backups))
-    if closed:
-        print("Steam was restarted." if restart else "Start Steam again.")
-    print(f"Steam uses {base.title!r} for {_GAME} with: {kinds}.")
-    _print_warnings(warnings)
-    return 0
+        if closed and request.restart:
+            request.client.start()
+        print(report)
+        if backups:
+            print("Backed up: " + ", ".join(backup.name for backup in backups))
+        if closed:
+            print(
+                "Steam was restarted."
+                if request.restart
+                else "Start Steam again."
+            )
+        print(f"Steam uses {base.title!r} for {_GAME} with: {kinds}.")
+        _print_warnings(warnings)

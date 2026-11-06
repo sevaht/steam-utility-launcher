@@ -28,7 +28,8 @@ classifiers = [
 ]
 dependencies = [
     "cryptography (>=42.0,<51.0)",
-    "vdf (>=3.4,<4.0)",
+    "platformdirs (>=4.0,<5.0)",
+    "psutil (>=6.0,<8.0)",
 ]
 
 [project.scripts]
@@ -47,6 +48,7 @@ dev = [
     "pytest (>=9.0.2,<10.0.0)",
     "ruff (>=0.15.8,<0.16.0)",
     "twine (>=6.2.0,<7.0.0)",
+    "types-psutil (>=6.0,<8.0)",
     "vulture (>=2.14,<3.0.0)",
 ]
 
@@ -78,7 +80,9 @@ testpaths = ["tests"]
 line-length = 79
 
 [tool.ruff.lint]
-extend-ignore = ["COM812", "COM819", "E203", "E501", "TD003"]
+# S603 flags every subprocess call that has a variable in it. Running programs
+# is what this one does, and every call passes a list (never a shell).
+extend-ignore = ["COM812", "COM819", "E203", "E501", "S603", "TD003"]
 select = [
     "A", "ANN", "ARG", "ASYNC", "B", "BLE", "C4", "C90", "COM",
     "DTZ", "E", "EM", "ERA", "F", "FA", "FLY", "FURB", "I",
@@ -88,7 +92,7 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"checks" = ["S603"]
+"checks" = ["S607"]
 "tests/**/*" = ["PLR2004", "S101"]
 
 [tool.vulture]

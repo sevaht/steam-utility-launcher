@@ -7,6 +7,8 @@ from http.client import HTTPSConnection
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from steam_utility_launcher.file_saver import FileSaver
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
@@ -119,12 +121,6 @@ def fetch(url: str) -> bytes | None:
     return content
 
 
-def _write_atomically(path: Path, content: bytes) -> None:
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_bytes(content)
-    temporary.replace(path)
-
-
 def needs_preparing(directory: Path) -> bool:
     return not (
         (directory / EK_PUBLIC_FILE).is_file()
@@ -178,7 +174,7 @@ def ensure_certificates(
         url = found[0] if found else None
     # The EK certificate itself goes last, so an interrupted run is retried.
     for index in range(len(chain), 0, -1):
-        _write_atomically(directory / cert_file_name(index), chain[index - 1])
+        FileSaver().write(directory / cert_file_name(index), chain[index - 1])
     if chain:
         logger.info("Saved %d EK certificate(s) in: %s", len(chain), directory)
     return len(chain)

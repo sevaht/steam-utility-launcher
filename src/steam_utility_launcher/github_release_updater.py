@@ -3,14 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import stat
 from contextlib import contextmanager
 from dataclasses import KW_ONLY, dataclass, field
 from email.message import Message
 from enum import Enum, auto, unique
 from http.client import HTTPSConnection
-from importlib.metadata import distribution
 from itertools import chain
 from os import sep
 from os.path import commonpath, normpath, pardir
@@ -23,13 +21,14 @@ from urllib.error import HTTPError
 from urllib.parse import urlparse
 from zipfile import ZipFile
 
+from .host import Host
+
 if TYPE_CHECKING:
-    import subprocess
     from collections.abc import Iterable, Iterator
     from http.client import HTTPResponse
     from types import TracebackType
 
-    from .steam import Process
+    from .steam import Process, RunningProcess
 
 logger = logging.getLogger(__name__)
 
@@ -414,10 +413,7 @@ class Asset:
             raise ValueError(msg)
 
 
-XDG_DATA_ROOT = (
-    Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    / distribution(__package__.split(".")[0]).metadata["Name"]
-)
+XDG_DATA_ROOT = Host.current().data_directory
 
 
 @dataclass(kw_only=True)
@@ -622,7 +618,7 @@ class ApplicationUpdater:
         for process in processes:
             process.registry_set |= self.launch_registry_set
             process.registry_unset |= self.launch_registry_unset
-        child_processes: list[subprocess.Popen[bytes]] = [
+        child_processes: list[RunningProcess] = [
             process.start() for process in processes
         ]
         for child in child_processes:

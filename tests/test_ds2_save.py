@@ -17,6 +17,7 @@ from steam_utility_launcher.ds2_save import SaveError, SaveFile
 from .ds2_save_helper import (
     PROFILE_MARKER_OFFSET,
     SETTINGS_MARKER_OFFSET,
+    SaveShape,
     build_save,
     entry_bytes,
     seal,
@@ -50,9 +51,9 @@ def _save(
         build_save(
             KEYBOARD.items(),
             MOUSE.items(),
-            terms=terms,
-            settings_terms=settings_terms,
-            marker=marker,
+            SaveShape(
+                terms=terms, settings_terms=settings_terms, marker=marker
+            ),
         )
     )
 
@@ -133,7 +134,7 @@ def test_an_action_the_save_lacks_is_an_error() -> None:
 def test_a_save_without_the_controls_is_refused() -> None:
     data = build_save([])
     with pytest.raises(SaveError, match="keyboard controls"):
-        SaveFile(data).controls  # noqa: B018
+        _ = SaveFile(data).controls
 
 
 def test_a_damaged_entry_is_refused() -> None:
@@ -141,7 +142,7 @@ def test_a_damaged_entry_is_refused() -> None:
     (offset,) = struct.unpack_from("<I", data, 64 + 16)
     data[offset + 40] ^= 0xFF
     with pytest.raises(SaveError, match="checksum"):
-        SaveFile(bytes(data)).controls  # noqa: B018
+        _ = SaveFile(bytes(data)).controls
 
 
 @pytest.mark.parametrize(
@@ -198,22 +199,24 @@ def test_a_save_made_accepted_reads_as_accepted() -> None:
 def test_terms_copies_that_disagree_are_an_error() -> None:
     save = _save(terms=True, settings_terms=False)
     with pytest.raises(SaveError, match="disagree"):
-        save.terms_accepted  # noqa: B018
+        _ = save.terms_accepted
 
 
 def test_a_save_without_the_settings_block_has_no_terms_flag() -> None:
     save = _save(marker=False)
     with pytest.raises(SaveError, match="terms flag"):
-        save.terms_accepted  # noqa: B018
+        _ = save.terms_accepted
     with pytest.raises(SaveError, match="terms flag"):
         save.with_terms_accepted()
     assert save.controls.keyboard == KEYBOARD  # the rest still works
 
 
 def test_a_save_without_a_last_settings_entry_has_no_terms_flag() -> None:
-    save = SaveFile(build_save(KEYBOARD.items(), entry_count=3))
+    save = SaveFile(
+        build_save(KEYBOARD.items(), shape=SaveShape(entry_count=3))
+    )
     with pytest.raises(SaveError, match="no entry 22"):
-        save.terms_accepted  # noqa: B018
+        _ = save.terms_accepted
 
 
 # --- building a save

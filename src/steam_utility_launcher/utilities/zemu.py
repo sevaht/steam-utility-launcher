@@ -25,10 +25,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
+import platformdirs
+
 from steam_utility_launcher import minisign, update_check
+from steam_utility_launcher.errors import UserError
 from steam_utility_launcher.games import Z1_BATTLE_ROYALE_ID
 from steam_utility_launcher.github_release_updater import (
-    XDG_DATA_ROOT,
+    HTTP_STATUS_OK,
     ApplicationUpdater,
     GitHubRepository,
     Release,
@@ -37,6 +40,7 @@ from steam_utility_launcher.github_release_updater import (
 from steam_utility_launcher.steam import Process
 
 if TYPE_CHECKING:
+    from steam_utility_launcher.host import Host
     from steam_utility_launcher.steam import Steam
 
 logger = logging.getLogger(__name__)
@@ -80,49 +84,12 @@ _DEFAULT_WINE_ENV = (
 )
 
 
-class InstallError(RuntimeError):
+class InstallError(UserError):
     """ZEmu Launcher couldn't be obtained or verified."""
 
 
-def _is_windows() -> bool:
-    return sys.platform == "win32"
-
-
-def _asset_pattern() -> re.Pattern[str]:
-    return _WINDOWS_ASSET_PATTERN if _is_windows() else _LINUX_ASSET_PATTERN
-
-
-def install_directory() -> Path:
-    return XDG_DATA_ROOT / _INSTALL_DIRECTORY_NAME
-
-
-def windows_app_directory() -> Path:
-    return install_directory() / _WINDOWS_APP_DIRECTORY_NAME
-
-
-def installed_executable() -> Path | None:
-    """The installed launcher, or None if it isn't installed."""
-    if not _is_windows():
-        appimage = install_directory() / _APPIMAGE_NAME
-        return appimage if appimage.is_file() else None
-    directory = windows_app_directory()
-    if not directory.is_dir():
-        return None
-    # The app's own file name isn't assumed: it is the one program there
-    # besides the uninstaller.
-    candidates = [
-        entry
-        for entry in directory.glob("*.exe")
-        if entry.name.lower() != _WINDOWS_UNINSTALLER_NAME
-    ]
-    return candidates[0] if len(candidates) == 1 else None
-
-
 def app_data_directory() -> Path:
-    data_home = os.environ.get("XDG_DATA_HOME") or str(
-        Path.home() / ".local" / "share"
-    )
-    return Path(data_home) / _APP_IDENTIFIER
+    return Path(platformdirs.user_data_dir(_APP_IDENTIFIER, appauthor=False))
 
 
 def _verify(
@@ -148,7 +115,7 @@ def _verify(
 
 def _get(url: str) -> bytes:
     status, body = https_get(url)
-    if status != 200:  # noqa: PLR2004
+    if status != HTTP_STATUS_OK:
         msg = f"Downloading {url} failed with HTTP status {status}"
         raise InstallError(msg)
     return body
@@ -175,78 +142,7 @@ def _run_windows_installer(installer: Path, target: Path) -> int:
     # NSIS wants /D= last and unquoted even when the path has spaces, which a
     # list of arguments can't express, so the command line is built as text.
     command_line = f'"{installer}" /S /D={target}'
-    return subprocess.run(command_line, check=False).returncode  # noqa: S603
-
-
-def _install(release: Release, asset: Path, *, public_key: str) -> None:
-    content = _download_verified(release, asset, public_key=public_key)
-    directory = install_directory()
-    directory.mkdir(parents=True, exist_ok=True)
-    if _is_windows():
-        target = windows_app_directory()
-        with TemporaryDirectory() as staging_dir:
-            installer = Path(staging_dir) / asset.name
-            installer.write_bytes(content)
-            return_code = _run_windows_installer(installer, target)
-        if return_code != 0:
-            msg = (
-                f"The ZEmu Launcher installer exited with status {return_code}"
-            )
-            raise InstallError(msg)
-        if installed_executable() is None:
-            msg = (
-                f"ZEmu Launcher's app wasn't found in {target} after"
-                " installing."
-            )
-            raise InstallError(msg)
-    else:
-        target = directory / _APPIMAGE_NAME
-        staging = target.with_suffix(".part")
-        staging.write_bytes(content)
-        staging.chmod(0o755)
-        staging.replace(target)
-    (directory / ApplicationUpdater.TAG_FILE_NAME).write_text(release.tag)
-    logger.info('Installed ZEmu Launcher "%s".', release.tag)
-
-
-def _install_if_needed(*, force: bool) -> None:
-    directory = install_directory()
-    directory.mkdir(parents=True, exist_ok=True)
-    tag_file = directory / ApplicationUpdater.TAG_FILE_NAME
-    installed_tag = tag_file.read_text().strip() if tag_file.exists() else ""
-    already_installed = installed_executable() is not None
-    marker = directory / update_check.MARKER_FILE_NAME
-    if (
-        already_installed
-        and not force
-        and update_check.checked_recently(marker)
-    ):
-        return
-
-    release = _REPOSITORY.get_release()
-    if not release:
-        msg = f"No release found for {_REPOSITORY}"
-        raise InstallError(msg)
-    update_check.record_checked_now(marker)
-    pattern = _asset_pattern()
-    asset = release.single_matching_asset(pattern)
-    if not asset:
-        msg = (
-            f"Release {release.tag} has no ZEmu Launcher download matching"
-            f" {pattern.pattern!r}"
-        )
-        raise InstallError(msg)
-    if already_installed and installed_tag != release.tag:
-        logger.warning(
-            'ZEmu Launcher update available ("%s" -> "%s"). ZEmu Launcher'
-            " updates itself once running; pass --force to this command to"
-            " install it immediately instead.",
-            installed_tag or "an untracked version",
-            release.tag,
-        )
-    if already_installed and not force:
-        return
-    _install(release, asset, public_key=_PUBLIC_KEY)
+    return subprocess.run(command_line, check=False).returncode
 
 
 def _normalized(name: str) -> str:
@@ -386,48 +282,165 @@ def launch_environment() -> dict[str, str]:
     return env
 
 
-def launch(
-    *,
-    steam: Steam | None = None,
-    force: bool = False,
-    configure: bool = True,
-    proton: Path | None = None,
-) -> int:
-    if not (_is_windows() or sys.platform.startswith("linux")):
-        logger.error("The zemu command only supports Linux and Windows.")
-        return 1
-    print(
-        "Starting ZEmu Launcher (https://zemu.uk). Unofficial wrapper; not"
-        " affiliated with ZEmu.",
-        file=sys.stderr,
-    )
-    try:
-        _install_if_needed(force=force)
-    except InstallError as error:
-        # A clear one-line message is wanted here, not a traceback.
-        logger.error("%s", error)  # noqa: TRY400
-        return 1
+class ZEmuLauncher:
+    """Installs and runs ZEmu Launcher on a system: the AppImage, pointed at
+    a Proton, on Linux; the official installer's app on Windows."""
 
-    if configure and not _is_windows():
-        proton_binary = pick_proton(steam, proton) if steam else None
-        if proton_binary is None:
-            logger.warning(
-                "No Proton install found to configure ZEmu Launcher with;"
-                " choose a Wine/Proton runtime in its Properties screen."
-            )
+    def __init__(self, host: Host) -> None:
+        self.host = host
+
+    @property
+    def _is_windows(self) -> bool:
+        return self.host.name == "windows"
+
+    @property
+    def install_directory(self) -> Path:
+        return self.host.data_directory / _INSTALL_DIRECTORY_NAME
+
+    @property
+    def windows_app_directory(self) -> Path:
+        return self.install_directory / _WINDOWS_APP_DIRECTORY_NAME
+
+    @property
+    def _asset_pattern(self) -> re.Pattern[str]:
+        return (
+            _WINDOWS_ASSET_PATTERN
+            if self._is_windows
+            else _LINUX_ASSET_PATTERN
+        )
+
+    def installed_executable(self) -> Path | None:
+        """The installed launcher, or None if it isn't installed."""
+        if not self._is_windows:
+            appimage = self.install_directory / _APPIMAGE_NAME
+            return appimage if appimage.is_file() else None
+        directory = self.windows_app_directory
+        if not directory.is_dir():
+            return None
+        # The app's own file name isn't assumed: it is the one program there
+        # besides the uninstaller.
+        candidates = [
+            entry
+            for entry in directory.glob("*.exe")
+            if entry.name.lower() != _WINDOWS_UNINSTALLER_NAME
+        ]
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _install(
+        self, release: Release, asset: Path, *, public_key: str
+    ) -> None:
+        content = _download_verified(release, asset, public_key=public_key)
+        directory = self.install_directory
+        directory.mkdir(parents=True, exist_ok=True)
+        if self._is_windows:
+            target = self.windows_app_directory
+            with TemporaryDirectory() as staging_dir:
+                installer = Path(staging_dir) / asset.name
+                installer.write_bytes(content)
+                return_code = _run_windows_installer(installer, target)
+            if return_code != 0:
+                msg = (
+                    "The ZEmu Launcher installer exited with status"
+                    f" {return_code}"
+                )
+                raise InstallError(msg)
+            if self.installed_executable() is None:
+                msg = (
+                    f"ZEmu Launcher's app wasn't found in {target} after"
+                    " installing."
+                )
+                raise InstallError(msg)
         else:
-            configure_wine(
-                app_data_directory() / _CONFIG_FILE_NAME, proton_binary
-            )
+            target = directory / _APPIMAGE_NAME
+            staging = target.with_suffix(".part")
+            staging.write_bytes(content)
+            staging.chmod(0o755)
+            staging.replace(target)
+        (directory / ApplicationUpdater.TAG_FILE_NAME).write_text(release.tag)
+        logger.info('Installed ZEmu Launcher "%s".', release.tag)
 
-    executable = installed_executable()
-    if executable is None:
-        logger.error("ZEmu Launcher isn't installed; try --force.")
-        return 1
-    if _is_windows():
-        # Natively on Windows: no Proton to set up, and no environment to fix.
-        return Process([str(executable)], cwd=executable.parent).start().wait()
-    child = Process(
-        [str(executable)], env=launch_environment(), cwd=install_directory()
-    ).start()
-    return child.wait()
+    def _install_if_needed(self, *, force: bool) -> None:
+        directory = self.install_directory
+        directory.mkdir(parents=True, exist_ok=True)
+        tag_file = directory / ApplicationUpdater.TAG_FILE_NAME
+        installed_tag = (
+            tag_file.read_text().strip() if tag_file.exists() else ""
+        )
+        already_installed = self.installed_executable() is not None
+        marker = directory / update_check.MARKER_FILE_NAME
+        if (
+            already_installed
+            and not force
+            and update_check.checked_recently(marker)
+        ):
+            return
+
+        release = _REPOSITORY.get_release()
+        if not release:
+            msg = f"No release found for {_REPOSITORY}"
+            raise InstallError(msg)
+        update_check.record_checked_now(marker)
+        pattern = self._asset_pattern
+        asset = release.single_matching_asset(pattern)
+        if not asset:
+            msg = (
+                f"Release {release.tag} has no ZEmu Launcher download"
+                f" matching {pattern.pattern!r}"
+            )
+            raise InstallError(msg)
+        if already_installed and installed_tag != release.tag:
+            logger.warning(
+                'ZEmu Launcher update available ("%s" -> "%s"). ZEmu'
+                " Launcher updates itself once running; pass --force to this"
+                " command to install it immediately instead.",
+                installed_tag or "an untracked version",
+                release.tag,
+            )
+        if already_installed and not force:
+            return
+        self._install(release, asset, public_key=_PUBLIC_KEY)
+
+    def launch(
+        self,
+        *,
+        steam: Steam | None = None,
+        force: bool = False,
+        configure: bool = True,
+        proton: Path | None = None,
+    ) -> int:
+        print(
+            "Starting ZEmu Launcher (https://zemu.uk). Unofficial wrapper;"
+            " not affiliated with ZEmu.",
+            file=sys.stderr,
+        )
+        self._install_if_needed(force=force)
+
+        if configure and not self._is_windows:
+            proton_binary = pick_proton(steam, proton) if steam else None
+            if proton_binary is None:
+                logger.warning(
+                    "No Proton install found to configure ZEmu Launcher with;"
+                    " choose a Wine/Proton runtime in its Properties screen."
+                )
+            else:
+                configure_wine(
+                    app_data_directory() / _CONFIG_FILE_NAME, proton_binary
+                )
+
+        executable = self.installed_executable()
+        if executable is None:
+            msg = "ZEmu Launcher isn't installed; try --force."
+            raise InstallError(msg)
+        if self._is_windows:
+            # Natively on Windows: no Proton to set up, no environment to fix.
+            return (
+                Process([str(executable)], cwd=executable.parent)
+                .start()
+                .wait()
+            )
+        child = Process(
+            [str(executable)],
+            env=launch_environment(),
+            cwd=self.install_directory,
+        ).start()
+        return child.wait()

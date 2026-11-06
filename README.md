@@ -2,8 +2,13 @@
 
 Downloads game utilities from GitHub releases and launches them. On Linux it
 runs them within the same Proton prefix the game uses, so trainers and practice
-tools function properly. On Windows only the download/update functionality is
-useful; running tools inside a Proton prefix is Linux-only.
+tools function properly. On Windows the same utilities are downloaded, updated
+and run directly, and the things that are about Steam rather than Proton work
+too: adding the non-Steam game entries, Dark Souls II's controls and its Steam
+Input layout. What is about Proton itself (`proton`, `manual`, `prefix-path`,
+`enable-hwid-access`, and the options of `rotk-launcher` and `zemu` that tune
+the game under Proton) is Linux-only: on Windows those commands say so and
+exit, and those options aren't accepted.
 
 ## Installation
 
@@ -75,7 +80,13 @@ with none, and nothing is touched or closed: it just starts the shortcut. The
 options can also be edited in the shortcut's Properties in Steam, and work the
 same: they go between `rotk-launcher` and the `--`.
 
-On Windows, run `steam-utility-launcher rotk-launcher` directly.
+On Windows it works the same way, with nothing to wrap: the entry runs this
+program itself (`steam-utility-launcher rotk-launcher --run-from-steam`), which
+installs ROTK Launcher if it isn't, then runs it. Run
+`steam-utility-launcher rotk-launcher` on its own to add that entry and start
+it; Steam is closed and started again for that as on Linux. The options that
+tune the game under Proton (`--hud`, `--max-fps`, `--vsync`, the TPM and
+overlay ones) aren't there, as the game isn't running under DXVK.
 
 To set the shortcut up by hand instead: add a non-Steam game (its target is
 never run, but it can't be empty or Steam shows no icon: use `/usr/bin/true`),
@@ -488,7 +499,8 @@ game, then run:
 ```bash
 steam-utility-launcher ds2-bindings
 ```
-This finds the game's save in its Proton prefix, backs it up beside itself
+This finds the game's save (in its Proton prefix on Linux, in
+`%APPDATA%\DarkSoulsII` on Windows), backs it up beside itself
 (`DS2SOFS0000.sl2.sul-backup-<time>`), and sets every control listed in the
 bundled `resources/ds2_key_bindings.toml`. Only the controls are changed; the
 rest of the file is left as it was.
@@ -558,6 +570,7 @@ not changed here.
 Steam keeps the layouts and the choices in memory and saves them when it exits,
 so it has to be closed for the change; the command asks first (`-y` to skip the
 question) and starts it again afterwards (`--no-restart` to leave it closed).
+This works the same on Linux and Windows.
 Files it replaces are backed up beside themselves, and nothing is touched, or
 closed, if Steam already uses the layouts. `--dry-run` says what would change,
 and `--layout` uses a layout file of your own (as Steam saves one) instead.
@@ -608,11 +621,12 @@ library.
 [SVT-GE-Proton](#svt-ge-proton).) Tools are downloaded to:
 
 ```
-~/.local/share/steam-utility-launcher/<ToolName>/
+~/.local/share/steam-utility-launcher/<ToolName>/                (Linux)
+%LOCALAPPDATA%\steam-utility-launcher\<ToolName>\               (Windows)
 ```
 
 For example, DSR-Gadget lives at
-`~/.local/share/steam-utility-launcher/DSR-Gadget/`.
+`~/.local/share/steam-utility-launcher/DSR-Gadget/` on Linux.
 
 Each tool directory contains a `.github_release_tag` file recording the
 installed version. The launcher checks GitHub on every run and updates

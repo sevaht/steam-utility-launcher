@@ -7,14 +7,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import shutil
 import tomllib
 from dataclasses import dataclass
-from datetime import datetime
 from importlib import resources
-from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from steam_utility_launcher import ds2_save
@@ -32,22 +28,23 @@ from steam_utility_launcher.ds2_inputs import (
     CodeNames,
 )
 from steam_utility_launcher.ds2_newsave import new_save, steam_id_text
-from steam_utility_launcher.games import DS2_SOTFS_ID
-from steam_utility_launcher.steam import Steam, SteamError
+from steam_utility_launcher.errors import UserError
+from steam_utility_launcher.file_saver import FileSaver
+from steam_utility_launcher.host import Host
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from pathlib import Path
+
+    from steam_utility_launcher.programs import WindowsFileSystem
+    from steam_utility_launcher.steam import SteamLocation
 
 logger = logging.getLogger(__name__)
 
 SAVE_FILE_NAME = "DS2SOFS0000.sl2"
 _CONFIG_RESOURCE = "ds2_key_bindings.toml"
 _GAME_EXECUTABLE = "DarkSoulsII.exe"
-_SAVES_IN_PREFIX = (
-    Path("drive_c") / "users" / "steamuser" / "AppData" / "Roaming"
-)
 _SAVES_DIRECTORY_NAME = "DarkSoulsII"
-_PROCESSES = Path("/proc")
 _KEYBOARD = "keyboard"
 _MOUSE = "mouse"
 _MODIFIER = "modifier"
@@ -254,67 +251,44 @@ def parse_steam_id(text: str) -> int:
     raise ValueError(msg)
 
 
-def saves_directory(steam: Steam) -> Path:
-    """Where the game keeps its saves, in its Proton prefix: a folder for each
-    Steam account."""
-    return (
-        steam.game_wine_prefix(game_id=DS2_SOTFS_ID)
-        / _SAVES_IN_PREFIX
-        / _SAVES_DIRECTORY_NAME
+class Ds2Saves:
+    """Where the game keeps its saves on a system: a folder for each Steam
+    account, in the roaming application data of the Windows the game runs in
+    (its Proton prefix on Linux)."""
+
+    def __init__(self, filesystem: WindowsFileSystem) -> None:
+        self.filesystem = filesystem
+
+    @property
+    def directory(self) -> Path:
+        return self.filesystem.roaming_appdata / _SAVES_DIRECTORY_NAME
+
+    def path_for(self, steam_id: int) -> Path:
+        """Where the save of a Steam account is, or would be."""
+        return self.directory / steam_id_text(steam_id) / SAVE_FILE_NAME
+
+    def find(self) -> Path:
+        """The game's save file."""
+        found = sorted(self.directory.glob(f"*/{SAVE_FILE_NAME}"))
+        if not found:
+            msg = (
+                f"no save file under {self.directory}; pass --create to make"
+                " one, or point to one with --save"
+            )
+            raise FileNotFoundError(msg)
+        if len(found) > 1:
+            msg = "more than one save file found; pick one with --save:\n" + (
+                "\n".join(f"  {path}" for path in found)
+            )
+            raise FileNotFoundError(msg)
+        return found[0]
+
+
+def game_is_running(host: Host | None = None) -> bool:
+    """Whether this user has the game running (in Proton, Wine or Windows)."""
+    return (host or Host.current()).processes.is_running_with_command_line(
+        _GAME_EXECUTABLE
     )
-
-
-def find_save(steam: Steam) -> Path:
-    """The game's save file in its Proton prefix."""
-    saves = saves_directory(steam)
-    found = sorted(saves.glob(f"*/{SAVE_FILE_NAME}"))
-    if not found:
-        msg = (
-            f"no save file under {saves}; pass --create to make one, or point"
-            " to one with --save"
-        )
-        raise FileNotFoundError(msg)
-    if len(found) > 1:
-        msg = "more than one save file found; pick one with --save:\n" + (
-            "\n".join(f"  {path}" for path in found)
-        )
-        raise FileNotFoundError(msg)
-    return found[0]
-
-
-def game_is_running() -> bool:
-    """Whether this user has the game running (in Proton or Wine)."""
-    if not _PROCESSES.is_dir():
-        msg = "cannot tell whether the game is running (no /proc here)"
-        raise OSError(msg)
-    uid = os.getuid()
-    own = os.getpid()
-    for entry in _PROCESSES.iterdir():
-        if not entry.name.isdigit() or int(entry.name) == own:
-            continue
-        try:
-            if entry.stat().st_uid != uid:
-                continue
-            command_line = (entry / "cmdline").read_bytes()
-        except OSError:
-            continue
-        if _GAME_EXECUTABLE.encode() in command_line:
-            return True
-    return False
-
-
-def _stamp() -> str:
-    return datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005
-
-
-def _write_atomically(path: Path, content: bytes) -> None:
-    """Writes the file whole or not at all, with the mode it had if it did."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    staging = path.with_name(path.name + ".sul-new")
-    staging.write_bytes(content)
-    if path.exists():
-        shutil.copymode(path, staging)
-    staging.replace(path)
 
 
 def _report(current: Controls, changes: Controls) -> list[str]:
@@ -336,13 +310,9 @@ class _Plan:
     def write(self) -> str | None:
         """Writes it, after backing up what it replaces; the backup's name,
         if there was one."""
-        backup = None
-        if self.replaces:
-            backup = self.path.with_name(
-                f"{self.path.name}.sul-backup-{_stamp()}"
-            )
-            shutil.copy2(self.path, backup)
-        _write_atomically(self.path, self.save.data)
+        saver = FileSaver()
+        backup = saver.back_up(self.path) if self.replaces else None
+        saver.write(self.path, self.save.data)
         return backup.name if backup else None
 
 
@@ -383,84 +353,82 @@ def _create_plan(
     )
 
 
-def _steam_id_for(steam: Steam | None, steam_id: int | None) -> int:
-    if steam_id is not None:
-        return steam_id
-    if steam is None:
-        msg = "pass --steam-id to say which account the save is for"
-        raise ValueError(msg)
-    return steam.location.account_steam_id()
+@dataclass(frozen=True, kw_only=True)
+class BindingsRequest:
+    """What `ds2-bindings` was asked to do."""
+
+    save: Path | None = None
+    config: Path | None = None
+    show: bool = False
+    dry_run: bool = False
+    create: bool = False
+    accept_terms: bool = True
+    steam_id: int | None = None
+    saves: Ds2Saves | None = None
+    location: SteamLocation | None = None
+    host: Host | None = None
 
 
-def _plan(  # noqa: PLR0913
-    *,
-    save: Path | None,
-    config: Path | None,
-    create: bool,
-    accept_terms: bool,
-    steam: Steam | None,
-    steam_id: int | None,
-) -> _Plan | None:
-    if not create:
-        path = save or find_save(Steam.require(steam))
-        return _update_plan(path, config)
-    account = _steam_id_for(steam, steam_id)
-    path = save or (
-        saves_directory(Steam.require(steam))
-        / steam_id_text(account)
-        / SAVE_FILE_NAME
-    )
-    return _create_plan(path, account, config, accept_terms=accept_terms)
+class BindingsEditor:
+    """Sets the controls in a save, or makes a save that has them."""
 
+    def __init__(self, request: BindingsRequest) -> None:
+        self.request = request
 
-def _show(save: Path | None, steam: Steam | None) -> int:
-    path = save or find_save(Steam.require(steam))
-    print(config_text(ds2_save.SaveFile.read(path).controls), end="")
-    return 0
+    @property
+    def _saves(self) -> Ds2Saves:
+        if self.request.saves is None:
+            msg = "pass --save to say which save file to use"
+            raise UserError(msg)
+        return self.request.saves
 
+    @property
+    def _account(self) -> int:
+        if self.request.steam_id is not None:
+            return self.request.steam_id
+        if self.request.location is None:
+            msg = "pass --steam-id to say which account the save is for"
+            raise UserError(msg)
+        return self.request.location.account_steam_id()
 
-def run(  # noqa: PLR0913
-    *,
-    save: Path | None = None,
-    config: Path | None = None,
-    show: bool = False,
-    dry_run: bool = False,
-    create: bool = False,
-    accept_terms: bool = True,
-    steam_id: int | None = None,
-    steam: Steam | None = None,
-) -> int:
-    try:
-        if show:
-            return _show(save, steam)
-        plan = _plan(
-            save=save,
-            config=config,
-            create=create,
-            accept_terms=accept_terms,
-            steam=steam,
-            steam_id=steam_id,
+    def _plan(self) -> _Plan | None:
+        request = self.request
+        if not request.create:
+            path = request.save or self._saves.find()
+            return _update_plan(path, request.config)
+        account = self._account
+        path = request.save or self._saves.path_for(account)
+        return _create_plan(
+            path, account, request.config, accept_terms=request.accept_terms
         )
+
+    def _show(self) -> None:
+        path = self.request.save or self._saves.find()
+        print(config_text(ds2_save.SaveFile.read(path).controls), end="")
+
+    def run(self) -> None:
+        """Does what was asked, and says what it did. Raises UserError if the
+        game is running, which would undo it."""
+        if self.request.show:
+            self._show()
+            return
+        plan = self._plan()
         if plan is None:
             print("The key bindings are already as configured.")
-            return 0
+            return
         report = "\n".join(plan.report)
-        if dry_run:
+        if self.request.dry_run:
             print(f"{report}\n(dry run: nothing was changed)")
-            return 0
-        if game_is_running():
-            logger.error(
+            return
+        if game_is_running(self.request.host):
+            msg = (
                 "Close Dark Souls II first: it rewrites its save file when it"
                 " exits, which would undo this."
             )
-            return 1
+            raise UserError(msg)
         backup = plan.write()
-    except (OSError, ValueError, ds2_save.SaveError, SteamError) as error:
-        logger.error("Could not set the keys: %s", error)  # noqa: TRY400
-        return 1
-    done = f"{'Updated' if plan.replaces else 'Made'} {plan.path}"
-    print(
-        f"{report}\n{done}"
-        + (f"\nBacked up the old one as {backup}" if backup else "")
-    )
-    return 0
+        done = f"{'Updated' if plan.replaces else 'Made'} {plan.path}"
+        print(
+            f"{report}\n{done}"
+            + (f"\nBacked up the old one as {backup}" if backup else "")
+        )

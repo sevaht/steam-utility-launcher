@@ -164,7 +164,7 @@ def run(*, disable: bool = False, assume_yes: bool = False) -> int:
     # terminal, not stdin, so this works interactively. -I ignores the
     # environment and user site, -B stops any .pyc being written as root.
     sudo = shutil.which("sudo") or "sudo"
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(
         [sudo, "--", _system_python(), "-I", "-B", "-", action],
         input=script,
         text=True,

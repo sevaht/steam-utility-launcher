@@ -15,14 +15,12 @@ is left exactly as Steam wrote it.
 from __future__ import annotations
 
 import re
-import shutil
 from dataclasses import dataclass
-from datetime import datetime
 from importlib import resources
 from typing import TYPE_CHECKING
 
-import vdf  # type: ignore[import-untyped]
-
+from steam_utility_launcher.file_saver import FileSaver
+from steam_utility_launcher.keyvalues import KeyValuesError, Section
 from steam_utility_launcher.steam import SteamError
 
 if TYPE_CHECKING:
@@ -195,13 +193,11 @@ def selected_template(configset: str, app_id: int) -> str | None:
     """The layout a configset has chosen for an app (as `CLOUD_<app
     id>/<name>`), or None if it has not chosen one by name."""
     try:
-        entries = vdf.loads(configset).get("controller_config", {})
-    except SyntaxError as error:
+        config = Section.from_text(configset)
+    except KeyValuesError as error:
         msg = f"the controller selection file is not valid: {error}"
         raise SteamError(msg) from error
-    entry = entries.get(str(app_id)) if isinstance(entries, dict) else None
-    template = entry.get("template") if isinstance(entry, dict) else None
-    return template if isinstance(template, str) else None
+    return config.find_string("controller_config", str(app_id), "template")
 
 
 def with_selection(configset: str | None, app_id: int, template: str) -> str:
@@ -339,19 +335,11 @@ def plan_device_choices(
 def write_changes(changes: list[FileChange]) -> list[Path]:
     """Writes the files, each whole or not at all, after backing up the ones
     that are there. The backups' paths."""
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005
+    saver = FileSaver()
     backups = []
     for change in changes:
-        change.path.parent.mkdir(parents=True, exist_ok=True)
-        if change.path.exists():
-            backup = change.path.with_name(
-                f"{change.path.name}.sul-backup-{stamp}"
-            )
-            shutil.copy2(change.path, backup)
+        backup = saver.back_up(change.path)
+        if backup is not None:
             backups.append(backup)
-        staging = change.path.with_name(change.path.name + ".sul-new")
-        staging.write_text(change.content, encoding="utf-8")
-        if change.path.exists():
-            shutil.copymode(change.path, staging)
-        staging.replace(change.path)
+        saver.write(change.path, change.content.encode("utf-8"))
     return backups

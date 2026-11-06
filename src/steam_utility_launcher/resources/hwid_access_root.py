@@ -78,7 +78,7 @@ def _reload_udev() -> None:
         ["trigger", "--action=change", "--subsystem-match=tpmrm"],
         ["settle"],
     ):
-        subprocess.run([udevadm, *args], check=False)  # noqa: S603
+        subprocess.run([udevadm, *args], check=False)
 
 
 def _write_conf(paths: list[Path]) -> None:
@@ -105,7 +105,7 @@ def _enable_dmi() -> None:
     print(f"Wrote {_CONF}")
     tmpfiles = shutil.which("systemd-tmpfiles")
     if tmpfiles:
-        result = subprocess.run(  # noqa: S603
+        result = subprocess.run(
             [tmpfiles, "--create", str(_CONF)], check=False
         )
         if result.returncode == 0:

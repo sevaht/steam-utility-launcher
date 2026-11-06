@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import re
-import sys
 
 from steam_utility_launcher.github_release_updater import (
     ApplicationUpdater,
     Asset,
     GitHubRepository,
 )
-from steam_utility_launcher.steam import Process, Steam
+from steam_utility_launcher.utilities.game_utility import ExecutableUtility
 
-
-def launch(*, steam: Steam | None = None) -> int:
-    updater = ApplicationUpdater(
+UTILITY = ExecutableUtility(
+    command="silky-souls",
+    help="Run the Dark Souls: Remastered SilkySouls tool.",
+    game_id="570940",
+    executable="SilkySouls.exe",
+    updater=ApplicationUpdater(
         name="SilkySouls",
         repository=GitHubRepository("SilkySouls", organization="borgCode"),
         assets=[
@@ -21,18 +23,5 @@ def launch(*, steam: Steam | None = None) -> int:
         preserved_paths=set(),
         launch_registry_set={"mscoree": "native,builtin"},
         launch_registry_unset={"*mscoree"},
-    )
-    install_directory = updater.default_install_directory
-    tool_path = [str(install_directory / "SilkySouls.exe")]
-    if sys.platform.startswith("linux"):
-        processes = [
-            Steam.require(steam).process_in_prefix(
-                tool_path, game_id="570940", cwd=install_directory
-            )
-        ]
-    else:
-        processes = [Process(tool_path, cwd=install_directory)]
-    updater.update()
-    updater.launch(processes, wait=True)
-
-    return 0
+    ),
+)

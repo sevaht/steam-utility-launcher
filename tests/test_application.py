@@ -5,6 +5,9 @@ from typing import Any
 import pytest
 
 from steam_utility_launcher import application
+from steam_utility_launcher.commands.utility_commands import (
+    RotkLauncherCommand,
+)
 from steam_utility_launcher.steam import Steam
 from steam_utility_launcher.utilities import rotk_launcher
 
@@ -13,16 +16,15 @@ def _launches(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Runs rotk-launcher without launching anything; returns what it was
     called with."""
     calls: list[dict[str, Any]] = []
-    monkeypatch.setattr("sys.platform", "linux")
     monkeypatch.setattr(
-        Steam, "from_detection", classmethod(lambda _cls: object())
+        Steam, "from_detection", classmethod(lambda _cls, _host=None: object())
     )
 
-    def launch(**kwargs: object) -> int:
-        calls.append(kwargs)
+    def launch(_self: object, options: object = None, **kwargs: object) -> int:
+        calls.append({"options": options, **kwargs})
         return 0
 
-    monkeypatch.setattr(rotk_launcher, "launch", launch)
+    monkeypatch.setattr(rotk_launcher.RotkLauncher, "launch", launch)
     return calls
 
 
@@ -165,6 +167,6 @@ def test_taking_the_steam_overlay_away_is_forwarded(
 def test_only_the_launch_options_go_into_the_shortcut(
     argv: list[str], expected: list[str]
 ) -> None:
-    from steam_utility_launcher.application import _shortcut_options
-
-    assert _shortcut_options(argv, "rotk-launcher") == expected
+    assert (
+        RotkLauncherCommand.shortcut_options(argv, "rotk-launcher") == expected
+    )

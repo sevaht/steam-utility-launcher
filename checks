@@ -45,7 +45,7 @@ def main() -> int:
         print(f"Running {command[0]}... ({description})")
         try:
             run(
-                ["uv", "run", *command],  # noqa: S607
+                ["uv", "run", *command],
                 check=True,
                 cwd=project_root_dir,
                 env=env,

@@ -10,10 +10,10 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from pathlib import PureWindowsPath
+from pathlib import PurePath, PureWindowsPath
 from typing import TYPE_CHECKING
 
-import vdf  # type: ignore[import-untyped]
+from steam_utility_launcher.keyvalues import Section
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -29,7 +29,7 @@ _BUILTIN_MARKERS = (b"Wine builtin DLL", b"Wine placeholder DLL")
 _BUILTIN_MARKER_SPAN = 128
 
 
-def wine_path(host_path: Path) -> str:
+def wine_path(host_path: PurePath) -> str:
     """The same file as Wine sees it (the host's root is drive Z:)."""
     return str(PureWindowsPath("Z:" + host_path.as_posix()))
 
@@ -63,6 +63,18 @@ class WinePrefix:
     @property
     def program_files(self) -> Path:
         return self.path / "drive_c" / "Program Files"
+
+    @property
+    def _user_profile(self) -> Path:
+        return self.path / "drive_c" / "users" / "steamuser"
+
+    @property
+    def roaming_appdata(self) -> Path:
+        return self._user_profile / "AppData" / "Roaming"
+
+    @property
+    def local_appdata(self) -> Path:
+        return self._user_profile / "AppData" / "Local"
 
     def windows_file(self, *parts: str) -> Path:
         """A file below drive_c/windows, as the parts of its path."""
@@ -110,7 +122,7 @@ class WinePrefix:
         return ";".join(parts)
 
     def list_steam_library(
-        self, library: Path, app_ids: Sequence[str]
+        self, library: PurePath, app_ids: Sequence[str]
     ) -> None:
         """Has the prefix's own Steam folder (`Program Files/Steam`, which is
         where a Windows program that looks for Steam looks) list the Steam
@@ -119,17 +131,11 @@ class WinePrefix:
         not in the folder Proton makes for the prefix: Proton rewrites that
         list on every start. Raises OSError if the list can't be written."""
         steamapps = self.program_files / "Steam" / "steamapps"
-        content = vdf.dumps(
-            {
-                "libraryfolders": {
-                    "0": {
-                        "path": wine_path(library),
-                        "apps": dict.fromkeys(app_ids, "0"),
-                    }
-                }
-            },
-            pretty=True,
-        )
+        apps = Section(dict.fromkeys(app_ids, "0"))
+        folder = Section([("path", wine_path(library)), ("apps", apps)])
+        content = Section(
+            [("libraryfolders", Section([("0", folder)]))]
+        ).to_text()
         target = steamapps / "libraryfolders.vdf"
         steamapps.mkdir(parents=True, exist_ok=True)
         if not target.exists() or target.read_text() != content:

@@ -14,7 +14,6 @@ from steam_utility_launcher import (
     asar,
     hwid_access,
     powershell_log,
-    steam_shortcuts,
     svt_ge_proton,
     tpm_setup,
     update_check,
@@ -28,7 +27,19 @@ from steam_utility_launcher.github_release_updater import (
     Release,
     https_get,
 )
-from steam_utility_launcher.steam import CompatSession, Process, Steam
+from steam_utility_launcher.programs import NativeWindows, WindowsFileSystem
+from steam_utility_launcher.steam import (
+    CompatSession,
+    Process,
+    Steam,
+    SteamClient,
+    SteamLocation,
+)
+from steam_utility_launcher.steam_shortcuts import (
+    LaunchStyle,
+    ShortcutManager,
+    ShortcutSpec,
+)
 from steam_utility_launcher.wine_prefix import wine_path
 from steam_utility_launcher.wine_prefix_patches import (
     POWERSHELL_STAND_IN_PATH,
@@ -38,6 +49,7 @@ from steam_utility_launcher.wine_prefix_patches import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from steam_utility_launcher.host import Host
     from steam_utility_launcher.wine_prefix import WinePrefix
 
 logger = logging.getLogger(__name__)
@@ -63,6 +75,8 @@ _PROTON_COMMAND_LENGTH = 2
 _PREFIX_MAKER = ["cmd", "/c", "exit"]
 _ASSET_PATTERN = re.compile(r"ROTK-Launcher-[0-9]+(\.[0-9]+)*-x64\.exe")
 _CHECKSUMS_ASSET_NAME = Path("SHA256SUMS.txt")
+# Where the installer puts the launcher, below the Program Files folder.
+APP_RELATIVE_PATH = Path("ROTK Launcher") / "ROTK Launcher.exe"
 _CHECKSUM_LINE_PART_COUNT = 2
 
 
@@ -229,6 +243,9 @@ class LaunchOptions:
     shortcut_options: list[str] = field(default_factory=list)
     assume_yes: bool = False
     start_shortcut: bool = True
+    # Steam started this program as the shortcut (on Windows, where nothing
+    # else says so).
+    run_from_steam: bool = False
 
     @property
     def uses_tpm(self) -> bool:
@@ -341,9 +358,7 @@ class ShortcutLaunch:
 
     @property
     def app_path(self) -> Path:
-        return (
-            self.prefix.program_files / "ROTK Launcher" / "ROTK Launcher.exe"
-        )
+        return self.prefix.program_files / APP_RELATIVE_PATH
 
     def checks_pass(self, options: LaunchOptions) -> bool:
         """Whether the launch may go on, before anything is downloaded,
@@ -693,66 +708,99 @@ def _save_icon_from_any_prefix(steam: Steam) -> None:
     prefixes, if there is one (the wrapper does it itself after installing).
     Whichever prefix the shortcut has, as it is looked for in all of them."""
     for prefix in steam.prefixes():
-        candidate = (
-            prefix.program_files / "ROTK Launcher" / "ROTK Launcher.exe"
-        )
+        candidate = prefix.program_files / APP_RELATIVE_PATH
         if candidate.is_file() and _save_icon(candidate):
             return
 
 
-def _add_to_steam(steam: Steam, options: LaunchOptions) -> int:
+def _add_to_steam(
+    steam: Steam | None, host: Host, options: LaunchOptions
+) -> int:
     """Adds ROTK Launcher to Steam as a non-Steam game that runs this program
     with the shortcut options (see launch), or changes the options of the one
     that is there, and has Steam start it."""
-    _save_icon_from_any_prefix(steam)
-    app_id = steam_shortcuts.ensure_shortcut(
-        steam,
-        name=SHORTCUT_NAME,
-        program=_launcher_command(),
-        mode="rotk-launcher",
-        options=options.shortcut_options,
-        icon=icon_path(),
-        # The banner Steam shows for Z1 Battle Royale (if it has ever shown it)
-        artwork=steam.location.root / "appcache" / "librarycache" / GAME_ID,
+    location = (
+        steam.location
+        if steam is not None
+        else SteamLocation.from_detection(host)
+    )
+    if steam is not None:
+        _save_icon_from_any_prefix(steam)
+    manager = ShortcutManager(location, SteamClient(location, host))
+    manager.ensure(
+        ShortcutSpec(
+            name=SHORTCUT_NAME,
+            program=_launcher_command(),
+            mode="rotk-launcher",
+            options=options.shortcut_options,
+            style=LaunchStyle.for_host(host, steam),
+            icon=icon_path(),
+            # The banner Steam shows for Z1 Battle Royale (if it has ever
+            # shown it)
+            artwork=location.root / "appcache" / "librarycache" / GAME_ID,
+        ),
         assume_yes=options.assume_yes,
         launch=options.start_shortcut,
     )
-    return 0 if app_id is not None else 1
+    return 0
 
 
-def _launch_on_windows(options: LaunchOptions) -> int:
-    program_files = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
-    app_path = program_files / "ROTK Launcher" / "ROTK Launcher.exe"
-    LauncherInstaller(app_path, Process).ensure(force=options.force)
-    return Process([str(app_path)]).start().wait()
+@dataclass(frozen=True)
+class WindowsLaunch:
+    """A launch of ROTK Launcher as the Steam shortcut that runs this program
+    on Windows (`steam-utility-launcher rotk-launcher --run-from-steam`):
+    nothing is wrapped, so ROTK Launcher is installed if needed and run."""
+
+    filesystem: WindowsFileSystem
+
+    @property
+    def app_path(self) -> Path:
+        return self.filesystem.program_files / APP_RELATIVE_PATH
+
+    def run(self, options: LaunchOptions) -> int:
+        LauncherInstaller(self.app_path, Process).ensure(force=options.force)
+        return Process([str(self.app_path)]).start().wait()
 
 
-def launch(
-    *,
-    steam: Steam | None = None,
-    options: LaunchOptions | None = None,
-    steam_command: list[str] | None = None,
-    session: CompatSession | None = None,
-) -> int:
-    """Installs ROTK Launcher if needed and runs it.
+class RotkLauncher:
+    """Installs ROTK Launcher if needed and runs it, as the Steam shortcut this
+    program adds for it.
 
-    On Linux this is a wrapper in the launch options of a Steam shortcut
-    (`steam-utility-launcher rotk-launcher -- %command%`) that has a
-    compatibility tool: Steam makes the prefix and builds the command that
-    runs Proton in its runtime container (`steam_command`), and this prepares
-    the prefix, then has Steam's command run ROTK Launcher in place of the
-    shortcut's target (see ShortcutLaunch). `session` is what Steam tells it
-    of the launch.
+    Run on its own, it adds that shortcut to Steam, with
+    `options.shortcut_options` in its launch options, or updates the options
+    of the one that is there, then has Steam start it (unless
+    `options.start_shortcut` is off). Steam then runs this program again, as
+    the shortcut:
 
-    Run on its own (without Steam's command) it adds that shortcut to Steam,
-    with `options.shortcut_options` in its launch options, or updates the
-    options of the one that is there, then has Steam start it (unless
-    `options.start_shortcut` is off).
+    - On Linux it is a wrapper in the shortcut's launch options
+      (`steam-utility-launcher rotk-launcher -- %command%`) for a shortcut
+      that has a compatibility tool: Steam makes the prefix and builds the
+      command that runs Proton in its runtime container (`steam_command`), and
+      this prepares the prefix, then has Steam's command run ROTK Launcher in
+      place of the shortcut's target (see ShortcutLaunch). `session` is what
+      Steam tells it of the launch.
+    - On Windows Steam runs this program with `--run-from-steam` (see
+      WindowsLaunch).
     """
-    options = options or LaunchOptions()
-    if not sys.platform.startswith("linux"):
-        return _launch_on_windows(options)
-    steam = Steam.require(steam)
-    if not steam_command or not session:
-        return _add_to_steam(steam, options)
-    return ShortcutLaunch(steam, session, steam_command).run(options)
+
+    def __init__(self, host: Host, steam: Steam | None = None) -> None:
+        self.host = host
+        self.steam = steam
+
+    def launch(
+        self,
+        options: LaunchOptions | None = None,
+        *,
+        steam_command: list[str] | None = None,
+        session: CompatSession | None = None,
+    ) -> int:
+        options = options or LaunchOptions()
+        if self.host.supports_proton:
+            if steam_command and session:
+                steam = Steam.require(self.steam)
+                return ShortcutLaunch(steam, session, steam_command).run(
+                    options
+                )
+        elif options.run_from_steam:
+            return WindowsLaunch(NativeWindows()).run(options)
+        return _add_to_steam(self.steam, self.host, options)

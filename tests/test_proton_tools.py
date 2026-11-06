@@ -8,17 +8,22 @@ import logging
 import runpy
 import tarfile
 from pathlib import Path
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 
 from steam_utility_launcher import application, proton_tools, svt_ge_proton
 from steam_utility_launcher.github_release_updater import Release
-from steam_utility_launcher.steam import CompatibilityTool, Steam
+from steam_utility_launcher.steam import (
+    CompatibilityTool,
+    Steam,
+    SteamLocation,
+)
+
+from .steam_helper import make_tool
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
 GE_TAG = "GE-Proton10-4"
 GE_TOOL = "GE-Proton10-4-x86_64"
@@ -50,12 +55,16 @@ def _archive(path: Path, source: Path, *extra: tuple[str, bytes]) -> str:
     return hashlib.sha512(path.read_bytes()).hexdigest()
 
 
-class _FakeSteam:
+class _LocationOfTools(SteamLocation):
+    """A Steam installation whose tools folder is wherever a test put it."""
+
     def __init__(self, tools_directory: Path) -> None:
-        self.location = SimpleNamespace(
-            compatibility_tools_dir=tools_directory
-        )
-        self.compatibility_tools: list[SimpleNamespace] = []
+        super().__init__(root=tools_directory.parent, system_config_dirs=[])
+        self._tools_directory = tools_directory
+
+    @property
+    def compatibility_tools_dir(self) -> Path:
+        return self._tools_directory
 
 
 def _serve(
@@ -112,12 +121,17 @@ def _restore_logging() -> Iterator[None]:
     root.setLevel(level)
 
 
-def _steam(tools_directory: Path) -> Steam:
-    return cast("Steam", _FakeSteam(tools_directory))
+def _steam(
+    tools_directory: Path, tools: Sequence[CompatibilityTool] = ()
+) -> Steam:
+    return Steam(
+        location=_LocationOfTools(tools_directory),
+        compatibility_tools=list(tools),
+    )
 
 
 def _tool(name: str) -> CompatibilityTool:
-    return cast("CompatibilityTool", SimpleNamespace(internal_name=name))
+    return make_tool(Path("/tools") / name, name)
 
 
 # Naming
@@ -615,9 +629,9 @@ def test_a_newer_svt_ge_release_is_mentioned(
         lambda _source, _tag="": Release(tag="svt-GE-Proton11-12"),
     )
     tool = _build_tool(tmp_path, SVT_TOOL, "GE-Proton11-11", marker=SVT_TAG)
-    entry = SimpleNamespace(internal_name=SVT_TOOL, install_path=tool)
+    entry = make_tool(tool, SVT_TOOL)
     with caplog.at_level(logging.WARNING):
-        svt_ge_proton.warn_if_update_available(entry)  # type: ignore[arg-type]
+        svt_ge_proton.warn_if_update_available(entry)
     assert "svt-GE-Proton11-12" in caplog.text
     assert "proton svt-ge" in caplog.text
 
@@ -631,7 +645,7 @@ def test_the_command_installs_the_named_proton(
     calls: list[tuple[str, str, bool]] = []
     monkeypatch.setattr("sys.platform", "linux")
     monkeypatch.setattr(
-        Steam, "from_detection", classmethod(lambda _cls: object())
+        Steam, "from_detection", classmethod(lambda _cls, _host=None: object())
     )
     monkeypatch.setattr(
         proton_tools,
@@ -650,7 +664,7 @@ def test_a_failed_install_is_an_error_not_a_traceback(
 ) -> None:
     monkeypatch.setattr("sys.platform", "linux")
     monkeypatch.setattr(
-        Steam, "from_detection", classmethod(lambda _cls: object())
+        Steam, "from_detection", classmethod(lambda _cls, _host=None: object())
     )
 
     def fail(*_args: object, **_kwargs: object) -> bool:
@@ -670,11 +684,10 @@ def test_without_a_name_it_lists_what_can_be_installed(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    steam = _FakeSteam(tmp_path)
-    steam.compatibility_tools = [SimpleNamespace(internal_name=SVT_TOOL)]
+    steam = _steam(tmp_path, [_tool(SVT_TOOL)])
     monkeypatch.setattr("sys.platform", "linux")
     monkeypatch.setattr(
-        Steam, "from_detection", classmethod(lambda _cls: steam)
+        Steam, "from_detection", classmethod(lambda _cls, _host=None: steam)
     )
     assert application.main(["proton"]) == 0
     output = capsys.readouterr().out

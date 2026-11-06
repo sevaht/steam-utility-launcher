@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -31,7 +32,7 @@ _NOT_A_RECORD = struct.pack("<III", 0xFFFFFFFF, 0, 0)
 def seal(iv: bytes, plain: bytes) -> bytes:
     encryptor = Cipher(algorithms.AES128(KEY), modes.CBC(iv)).encryptor()
     body = iv + encryptor.update(plain) + encryptor.finalize()
-    return hashlib.md5(body).digest() + body  # noqa: S324
+    return hashlib.md5(body, usedforsecurity=False).digest() + body
 
 
 def unseal(raw: bytes) -> bytes:
@@ -98,23 +99,31 @@ def _plain(data: bytes) -> bytes:
     return struct.pack("<I", len(data)) + data + bytes(padding)
 
 
-def build_save(  # noqa: PLR0913
+@dataclass(frozen=True)
+class SaveShape:
+    """What a built save is like: a real one's, unless said otherwise. The
+    settings' terms flag matches the profile's unless `settings_terms` says."""
+
+    terms: bool = False
+    settings_terms: bool | None = None
+    marker: bool = True
+    entry_count: int = ENTRY_COUNT
+
+
+def build_save(
     keyboard: Iterable[tuple[int, KeyBinding]],
     mouse: Iterable[tuple[int, MouseBinding]] = (),
-    *,
-    terms: bool = False,
-    settings_terms: bool | None = None,
-    marker: bool = True,
-    entry_count: int = ENTRY_COUNT,
+    shape: SaveShape | None = None,
 ) -> bytes:
-    """A save: the profile, other entries, and the settings as the last. The
-    settings' terms flag matches the profile's unless `settings_terms` says."""
+    """A save: the profile, other entries, and the settings as the last."""
+    shape = shape or SaveShape()
     datas: list[bytes | bytearray] = [
-        profile_data(keyboard, mouse, terms=terms, marker=marker)
+        profile_data(keyboard, mouse, terms=shape.terms, marker=shape.marker)
     ]
-    datas += [bytes([index]) * 64 for index in range(1, entry_count - 1)]
-    if entry_count > 1:
-        mirrored = terms if settings_terms is None else settings_terms
+    datas += [bytes([index]) * 64 for index in range(1, shape.entry_count - 1)]
+    if shape.entry_count > 1:
+        settings_terms = shape.settings_terms
+        mirrored = shape.terms if settings_terms is None else settings_terms
         datas.append(settings_data(terms=mirrored))
     sealed = [
         seal(bytes([index + 1]) * 16, _plain(bytes(data)))

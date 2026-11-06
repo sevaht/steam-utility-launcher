@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import struct
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 
 from steam_utility_launcher import vc_runtime
 from steam_utility_launcher.wine_prefix import WinePrefix
+
+from .process_helper import FakeProcess
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -176,18 +178,7 @@ class _Runner:
 
     def __call__(self, command_line: list[str]) -> Process:
         self.commands.append(command_line)
-        return cast("Process", _FakeProcess(lambda: self.on_run(command_line)))
-
-
-class _FakeProcess:
-    def __init__(self, run: Callable[[], int]) -> None:
-        self.run = run
-
-    def start(self) -> _FakeProcess:
-        return self
-
-    def wait(self) -> int:
-        return int(self.run())
+        return FakeProcess(lambda: self.on_run(command_line))
 
 
 @pytest.fixture

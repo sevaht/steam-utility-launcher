@@ -1,19 +1,30 @@
 from __future__ import annotations
 
-import collections
+import dataclasses
 import shutil
 import subprocess
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, NoReturn, TypedDict, Unpack
 
 import pytest
-import vdf  # type: ignore[import-untyped]
 
 from steam_utility_launcher import steam_shortcuts
+from steam_utility_launcher.host import LinuxHost
+from steam_utility_launcher.keyvalues import Section
 from steam_utility_launcher.steam import (
     CompatibilityTool,
     Steam,
+    SteamClient,
     SteamError,
     SteamLocation,
+)
+from steam_utility_launcher.steam_shortcuts import (
+    CompatToolConfig,
+    DirectStyle,
+    LaunchStyle,
+    ShortcutEntry,
+    ShortcutManager,
+    ShortcutSpec,
+    WrapperStyle,
 )
 
 if TYPE_CHECKING:
@@ -60,32 +71,35 @@ def _steam(root: Path, *tool_names: str) -> Steam:
     )
 
 
+def _saved(root: Path) -> Section:
+    return Section.from_binary(_shortcuts_path(root).read_bytes())
+
+
+def _entry_at(root: Path, index: str = "0") -> Section:
+    return _saved(root).section("shortcuts", index)
+
+
 def _shortcuts_path(root: Path) -> Path:
     return root / "userdata" / str(ACCOUNT) / "config" / "shortcuts.vdf"
 
 
-def _write_shortcuts(root: Path, *entries: dict[str, object]) -> None:
+def _write_shortcuts(root: Path, *entries: Section) -> None:
     path = _shortcuts_path(root)
     path.parent.mkdir(parents=True)
-    data = collections.OrderedDict(
-        shortcuts=collections.OrderedDict(
-            (str(index), collections.OrderedDict(entry))
-            for index, entry in enumerate(entries)
-        )
+    shortcuts = Section(
+        [(str(index), entry) for index, entry in enumerate(entries)]
     )
-    path.write_bytes(vdf.binary_dumps(data))
+    path.write_bytes(Section([("shortcuts", shortcuts)]).to_binary())
 
 
 LAUNCHED: list[int] = []
-_REAL_LAUNCH = SteamLocation.launch_game
+_REAL_LAUNCH = SteamClient.launch_game
 
 
 def _client_running(
     monkeypatch: pytest.MonkeyPatch, running: Callable[[], bool]
 ) -> None:
-    monkeypatch.setattr(
-        SteamLocation, "is_client_running", staticmethod(running)
-    )
+    monkeypatch.setattr(SteamClient, "is_running", staticmethod(running))
 
 
 @pytest.fixture(autouse=True)
@@ -93,36 +107,77 @@ def _steam_not_running(monkeypatch: pytest.MonkeyPatch) -> None:
     _client_running(monkeypatch, lambda: False)
     LAUNCHED.clear()
     monkeypatch.setattr(
-        SteamLocation,
+        SteamClient,
         "launch_game",
-        lambda _location, app_id: LAUNCHED.append(app_id),
+        lambda _client, app_id: LAUNCHED.append(app_id),
     )
 
 
-def _ensure(steam: Steam, **kwargs: object) -> int | None:
-    options: dict[str, object] = {
-        "name": "ROTK Launcher",
-        "program": ["sul"],
-        "mode": "rotk-launcher",
-        "options": [],
-        "launch": False,
-    }
-    options.update(kwargs)
-    return steam_shortcuts.ensure_shortcut(steam, **options)  # type: ignore[arg-type]
+class _Changes(TypedDict, total=False):
+    """What a test changes in the shortcut it asks for."""
+
+    name: str
+    program: list[str]
+    mode: str
+    options: list[str]
+    style: LaunchStyle
+    icon: Path | None
+    artwork: Path | None
+
+
+def _ensure(
+    steam: Steam,
+    *,
+    ask: Callable[[str], str] = input,
+    assume_yes: bool = False,
+    launch: bool = False,
+    **changes: Unpack[_Changes],
+) -> int:
+    wanted = ShortcutSpec(
+        name="ROTK Launcher",
+        program=["sul"],
+        mode="rotk-launcher",
+        options=[],
+        style=WrapperStyle.for_steam(steam),
+    )
+    manager = ShortcutManager(
+        steam.location, SteamClient(steam.location, LinuxHost()), ask=ask
+    )
+    return manager.ensure(
+        dataclasses.replace(wanted, **changes),
+        assume_yes=assume_yes,
+        launch=launch,
+    )
+
+
+def _entry(
+    *, name: str, launch_options: str, icon: Path | None = None
+) -> Section:
+    entry = ShortcutEntry.create(
+        name=name,
+        exe="/usr/bin/true",
+        start_dir="/usr/bin/",
+        launch_options=launch_options,
+        icon=icon,
+    )
+    return entry.fields
+
+
+_WRAPPER = WrapperStyle(lambda: "SVT-GE-Proton-11")
 
 
 def test_app_ids_have_the_high_bit_set_and_depend_on_the_name() -> None:
-    first = steam_shortcuts.shortcut_app_id("", "ROTK Launcher")
-    second = steam_shortcuts.shortcut_app_id("", "Another")
+    first = ShortcutEntry.app_id_for("", "ROTK Launcher")
+    second = ShortcutEntry.app_id_for("", "Another")
     assert first & 0x80000000
-    assert first == steam_shortcuts.shortcut_app_id("", "ROTK Launcher")
+    assert first == ShortcutEntry.app_id_for("", "ROTK Launcher")
     assert first != second
 
 
 def test_app_ids_are_stored_signed_and_read_back_unsigned() -> None:
-    app_id = steam_shortcuts.shortcut_app_id("", "ROTK Launcher")
-    assert steam_shortcuts._unsigned(steam_shortcuts._signed(app_id)) == app_id
-    assert steam_shortcuts._signed(app_id) < 0
+    app_id = ShortcutEntry.app_id_for("", "ROTK Launcher")
+    assert ShortcutEntry.from_stored(ShortcutEntry.to_stored(app_id)) == app_id
+    assert ShortcutEntry.to_stored(app_id) < 0
 
 
 def test_the_account_is_the_one_that_signed_in_last(tmp_path: Path) -> None:
@@ -142,23 +197,25 @@ def test_several_accounts_none_the_latest_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_compat_tool_is_added_without_touching_the_rest() -> None:
-    changed = steam_shortcuts.with_compat_tool(CONFIG, 2288878336, "SVT-GE")
-    assert steam_shortcuts.compat_tool_of(changed, 2288878336) == "SVT-GE"
-    assert steam_shortcuts.compat_tool_of(changed, 367520) == "proton_hotfix"
-    expected = vdf.loads(CONFIG)
-    got = vdf.loads(changed)
-    mapping = got["InstallConfigStore"]["Software"]["Valve"]["Steam"]
-    del mapping["CompatToolMapping"]["2288878336"]
+    changed = CompatToolConfig(CONFIG).with_tool(2288878336, "SVT-GE")
+    assert changed.tool_of(2288878336) == "SVT-GE"
+    assert changed.tool_of(367520) == "proton_hotfix"
+    expected = Section.from_text(CONFIG)
+    got = Section.from_text(changed.text)
+    mapping = got.section(
+        "InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping"
+    )
+    del mapping["2288878336"]
     assert got == expected
     # Only added lines: every original line is still there, in order.
     original = CONFIG.splitlines()
-    remaining = iter(changed.splitlines())
+    remaining = iter(changed.text.splitlines())
     assert all(line in remaining for line in original)
 
 
 def test_a_config_without_a_mapping_section_is_refused() -> None:
     with pytest.raises(steam_shortcuts.ShortcutError, match="CompatTool"):
-        steam_shortcuts.with_compat_tool('"A"\n{\n}\n', 1, "t")
+        CompatToolConfig('"A"\n{\n}\n').with_tool(1, "t")
 
 
 def test_adding_a_shortcut_chooses_the_tool_for_it_alone(
@@ -174,34 +231,34 @@ def test_adding_a_shortcut_chooses_the_tool_for_it_alone(
     mapping = '\t\t\t\t"CompatToolMapping"\n\t\t\t\t{\n'
     config_path.write_text(CONFIG.replace(mapping, mapping + default))
     assert _ensure(steam)
-    app_id = steam_shortcuts.shortcut_app_id("/usr/bin/true", "ROTK Launcher")
+    app_id = ShortcutEntry.app_id_for("/usr/bin/true", "ROTK Launcher")
     config = config_path.read_text()
-    assert steam_shortcuts.compat_tool_of(config, 0) == "proton_experimental"
-    assert steam_shortcuts.compat_tool_of(config, 367520) == "proton_hotfix"
-    assert steam_shortcuts.compat_tool_of(config, app_id) == "SVT-GE-Proton-11"
+    assert CompatToolConfig(config).tool_of(0) == "proton_experimental"
+    assert CompatToolConfig(config).tool_of(367520) == "proton_hotfix"
+    assert CompatToolConfig(config).tool_of(app_id) == "SVT-GE-Proton-11"
 
 
 def test_a_new_shortcut_is_added_with_the_tool_and_a_backup(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     steam = _steam(tmp_path, "SVT-GE-Proton-9", "SVT-GE-Proton-11")
-    other = steam_shortcuts.new_entry(
-        name="Other", launch_options="x", icon=None
-    )
+    other = _entry(name="Other", launch_options="x", icon=None)
     _write_shortcuts(tmp_path, other)
     assert _ensure(steam)
-    data = vdf.binary_loads(_shortcuts_path(tmp_path).read_bytes())
-    entries = list(data["shortcuts"].values())
-    assert [entry["AppName"] for entry in entries] == [
+    entries = [
+        fields
+        for _, fields in _saved(tmp_path).section("shortcuts").subsections()
+    ]
+    assert [entry.string("AppName") for entry in entries] == [
         "Other",
         "ROTK Launcher",
     ]
     added = entries[1]
-    assert added["LaunchOptions"] == "sul rotk-launcher -- %command%"
-    app_id = added["appid"] & 0xFFFFFFFF
+    assert added.string("LaunchOptions") == "sul rotk-launcher -- %command%"
+    app_id = added.integer("appid") & 0xFFFFFFFF
     config = (tmp_path / "config" / "config.vdf").read_text()
     # The newest SVT-GE-Proton is chosen (by number: 11 is newer than 9).
-    assert steam_shortcuts.compat_tool_of(config, app_id) == "SVT-GE-Proton-11"
+    assert CompatToolConfig(config).tool_of(app_id) == "SVT-GE-Proton-11"
     assert (
         len(list((tmp_path / "config").glob("config.vdf.sul-backup-*"))) == 1
     )
@@ -217,7 +274,7 @@ def test_an_existing_shortcut_is_left_alone_and_steam_is_not_closed(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     steam = _steam(tmp_path, "SVT-GE-Proton-11")
-    existing = steam_shortcuts.new_entry(
+    existing = _entry(
         name="ROTK Launcher", launch_options="mine --max-fps 150", icon=None
     )
     _write_shortcuts(tmp_path, existing)
@@ -225,10 +282,10 @@ def test_an_existing_shortcut_is_left_alone_and_steam_is_not_closed(
     config_before = (tmp_path / "config" / "config.vdf").read_text()
     _client_running(monkeypatch, lambda: True)
 
-    def fail(*_a: object, **_k: object) -> None:
+    def fail(*_a: object, **_k: object) -> NoReturn:
         pytest.fail("Steam must not be closed for an entry that is there")
 
-    monkeypatch.setattr(SteamLocation, "shut_down_client", fail)
+    monkeypatch.setattr(SteamClient, "shut_down", fail)
     assert _ensure(steam, ask=fail)
     assert _shortcuts_path(tmp_path).read_bytes() == before
     assert (tmp_path / "config" / "config.vdf").read_text() == config_before
@@ -239,18 +296,20 @@ def test_an_entry_with_another_name_is_found_by_its_launch_options_and_renamed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     steam = _steam(tmp_path, "SVT-GE-Proton-11")
-    entry = steam_shortcuts.new_entry(
+    entry = _entry(
         name="Z1 mod", launch_options="/x/sul rotk-launcher -- ", icon=None
     )
     _write_shortcuts(tmp_path, entry)
     _client_running(monkeypatch, lambda: False)
-    app_id = entry["appid"]
+    app_id = entry.integer("appid")
     assert _ensure(steam)
-    saved = steam_shortcuts.load_shortcuts(_shortcuts_path(tmp_path))
-    entries = list(cast("dict[str, Any]", saved["shortcuts"]).values())
+    entries = [
+        fields
+        for _, fields in _saved(tmp_path).section("shortcuts").subsections()
+    ]
     assert len(entries) == 1
-    assert entries[0]["AppName"] == "ROTK Launcher"
-    assert entries[0]["appid"] == app_id  # so it keeps its prefix
+    assert entries[0].string("AppName") == "ROTK Launcher"
+    assert entries[0].integer("appid") == app_id  # so it keeps its prefix
 
 
 def test_steam_is_closed_after_asking_and_only_then_changed(
@@ -265,7 +324,7 @@ def test_steam_is_closed_after_asking_and_only_then_changed(
         closed.append(True)
         running[0] = False
 
-    monkeypatch.setattr(SteamLocation, "shut_down_client", shut_down)
+    monkeypatch.setattr(SteamClient, "shut_down", shut_down)
     prompts: list[str] = []
 
     def ask(prompt: str) -> str:
@@ -280,15 +339,12 @@ def test_steam_is_closed_after_asking_and_only_then_changed(
 
 
 def test_declining_to_close_steam_changes_nothing(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     steam = _steam(tmp_path, "SVT-GE-Proton-11")
     _client_running(monkeypatch, lambda: True)
-    with caplog.at_level("ERROR"):
-        assert not _ensure(steam, ask=lambda _prompt: "n")
-    assert "Close Steam" in caplog.text
+    with pytest.raises(SteamError, match="Close Steam"):
+        _ensure(steam, ask=lambda _prompt: "n")
     assert not _shortcuts_path(tmp_path).exists()
 
 
@@ -301,7 +357,8 @@ def test_no_answer_available_counts_as_no(
     def no_input(_prompt: str) -> str:
         raise EOFError
 
-    assert not _ensure(steam, ask=no_input)
+    with pytest.raises(SteamError, match="Close Steam"):
+        _ensure(steam, ask=no_input)
     assert not _shortcuts_path(tmp_path).exists()
 
 
@@ -312,8 +369,8 @@ def test_yes_closes_steam_without_asking(
     running = [True]
     _client_running(monkeypatch, lambda: running[0])
     monkeypatch.setattr(
-        SteamLocation,
-        "shut_down_client",
+        SteamClient,
+        "shut_down",
         lambda _location: running.__setitem__(0, False),
     )
 
@@ -324,13 +381,12 @@ def test_yes_closes_steam_without_asking(
     assert _shortcuts_path(tmp_path).exists()
 
 
-def test_without_svt_ge_proton_nothing_is_changed(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_without_svt_ge_proton_nothing_is_changed(tmp_path: Path) -> None:
     steam = _steam(tmp_path, "proton_experimental")
-    with caplog.at_level("ERROR"):
-        assert not _ensure(steam)
-    assert "SVT-GE-Proton isn't installed" in caplog.text
+    with pytest.raises(
+        steam_shortcuts.ShortcutError, match="SVT-GE-Proton isn't installed"
+    ):
+        _ensure(steam)
     assert not _shortcuts_path(tmp_path).exists()
 
 
@@ -340,15 +396,13 @@ def test_the_shortcut_names_the_icon_even_before_it_exists(
     steam = _steam(tmp_path, "SVT-GE-Proton-11")
     icon = tmp_path / "data" / "icon.png"
     assert _ensure(steam, icon=icon)
-    data = vdf.binary_loads(_shortcuts_path(tmp_path).read_bytes())
-    assert data["shortcuts"]["0"]["icon"] == str(icon)
+    assert _entry_at(tmp_path).string("icon") == str(icon)
 
 
 def test_a_shortcut_without_an_icon_gets_none(tmp_path: Path) -> None:
     steam = _steam(tmp_path, "SVT-GE-Proton-11")
     assert _ensure(steam)
-    data = vdf.binary_loads(_shortcuts_path(tmp_path).read_bytes())
-    assert data["shortcuts"]["0"]["icon"] == ""
+    assert _entry_at(tmp_path).string("icon") == ""
 
 
 def test_a_different_icon_updates_just_the_icon(
@@ -357,10 +411,11 @@ def test_a_different_icon_updates_just_the_icon(
     steam = _existing(tmp_path, "sul rotk-launcher --tpm -- %command%")
     icon = tmp_path / "icon.png"
     assert _ensure(steam, icon=icon)
-    data = vdf.binary_loads(_shortcuts_path(tmp_path).read_bytes())
-    entry = data["shortcuts"]["0"]
-    assert entry["icon"] == str(icon)
-    assert entry["LaunchOptions"] == "sul rotk-launcher --tpm -- %command%"
+    entry = _entry_at(tmp_path)
+    assert entry.string("icon") == str(icon)
+    assert (
+        entry.string("LaunchOptions") == "sul rotk-launcher --tpm -- %command%"
+    )
     assert "Updated the icon" in capsys.readouterr().out
 
 
@@ -374,13 +429,13 @@ def test_the_same_icon_changes_nothing(tmp_path: Path) -> None:
 
 
 def _launch_options_of(root: Path) -> list[str]:
-    data = vdf.binary_loads(_shortcuts_path(root).read_bytes())
-    return [e["LaunchOptions"] for e in data["shortcuts"].values()]
+    shortcuts = _saved(root).section("shortcuts")
+    return [e.string("LaunchOptions") for _, e in shortcuts.subsections()]
 
 
 def test_the_launch_options_are_built_around_steams_command() -> None:
     assert (
-        steam_shortcuts.launch_options_for(
+        _WRAPPER.launch_options(
             ["/a b/sul"], "rotk-launcher", ["--max-fps", "150"]
         )
         == "'/a b/sul' rotk-launcher --max-fps 150 -- %command%"
@@ -401,13 +456,13 @@ def test_the_launch_options_are_built_around_steams_command() -> None:
 def test_the_options_in_launch_options_are_read(
     current: str, expected: list[str] | None
 ) -> None:
-    assert steam_shortcuts.options_in(current, "rotk-launcher") == expected
+    assert _WRAPPER.options_in(current, "rotk-launcher") == expected
 
 
 def test_replacing_options_keeps_everything_else_in_the_launch_options() -> (
     None
 ):
-    result = steam_shortcuts.with_options(
+    result = _WRAPPER.with_options(
         "FOO=1 /old/sul rotk-launcher --tpm -- %command% --x",
         ["/new/sul"],
         "rotk-launcher",
@@ -420,7 +475,7 @@ def test_replacing_options_keeps_everything_else_in_the_launch_options() -> (
 
 def test_launch_options_in_another_form_are_written_afresh() -> None:
     assert (
-        steam_shortcuts.with_options(
+        _WRAPPER.with_options(
             "something else", ["/new/sul"], "rotk-launcher", ["--tpm"]
         )
         == "/new/sul rotk-launcher --tpm -- %command%"
@@ -431,9 +486,7 @@ def _existing(root: Path, launch_options: str) -> Steam:
     steam = _steam(root, "SVT-GE-Proton-11")
     _write_shortcuts(
         root,
-        steam_shortcuts.new_entry(
-            name="ROTK Launcher", launch_options=launch_options, icon=None
-        ),
+        _entry(name="ROTK Launcher", launch_options=launch_options, icon=None),
     )
     return steam
 
@@ -483,8 +536,8 @@ def test_an_update_closes_steam_after_asking(
     running = [True]
     _client_running(monkeypatch, lambda: running[0])
     monkeypatch.setattr(
-        SteamLocation,
-        "shut_down_client",
+        SteamClient,
+        "shut_down",
         lambda _location: running.__setitem__(0, False),
     )
     prompts: list[str] = []
@@ -501,16 +554,13 @@ def test_an_update_closes_steam_after_asking(
 
 
 def test_an_update_that_steam_being_open_prevents_says_so(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     steam = _existing(tmp_path, "sul rotk-launcher -- %command%")
     before = _shortcuts_path(tmp_path).read_bytes()
     _client_running(monkeypatch, lambda: True)
-    with caplog.at_level("ERROR"):
-        assert not _ensure(steam, options=["--tpm"], ask=lambda _p: "n")
-    assert "update the launch options" in caplog.text
+    with pytest.raises(SteamError, match="update the launch options"):
+        _ensure(steam, options=["--tpm"], ask=lambda _p: "n")
     assert _shortcuts_path(tmp_path).read_bytes() == before
 
 
@@ -519,8 +569,7 @@ def test_the_shortcut_is_started_through_steam_after_it_is_added(
 ) -> None:
     steam = _steam(tmp_path, "SVT-GE-Proton-11")
     app_id = _ensure(steam, launch=True)
-    data = vdf.binary_loads(_shortcuts_path(tmp_path).read_bytes())
-    assert app_id == data["shortcuts"]["0"]["appid"] & 0xFFFFFFFF
+    assert app_id == _entry_at(tmp_path).integer("appid") & 0xFFFFFFFF
     assert [app_id] == LAUNCHED
     assert "Starting it through Steam" in capsys.readouterr().out
 
@@ -548,7 +597,8 @@ def test_nothing_is_started_if_the_shortcut_could_not_be_set_up(
     tmp_path: Path,
 ) -> None:
     steam = _steam(tmp_path, "proton_experimental")  # no SVT-GE-Proton
-    assert _ensure(steam, launch=True) is None
+    with pytest.raises(steam_shortcuts.ShortcutError):
+        _ensure(steam, launch=True)
     assert LAUNCHED == []
 
 
@@ -561,7 +611,10 @@ def test_the_game_id_steam_is_given_is_the_app_id_shifted(
         subprocess, "Popen", lambda command, **_kwargs: started.append(command)
     )
     _REAL_LAUNCH(
-        SteamLocation(root=tmp_path, system_config_dirs=[]), 3149906526
+        SteamClient(
+            SteamLocation(root=tmp_path, system_config_dirs=[]), LinuxHost()
+        ),
+        3149906526,
     )
     assert started == [
         ["/bin/steam", "steam://rungameid/13528745514660528128"]
@@ -571,32 +624,31 @@ def test_the_game_id_steam_is_given_is_the_app_id_shifted(
 def test_a_new_shortcut_has_a_target_that_does_nothing(tmp_path: Path) -> None:
     steam = _steam(tmp_path, "SVT-GE-Proton-11")
     assert _ensure(steam)
-    data = vdf.binary_loads(_shortcuts_path(tmp_path).read_bytes())
-    entry = data["shortcuts"]["0"]
+    entry = _entry_at(tmp_path)
     # Steam shows no icon for a shortcut with no target.
-    assert entry["Exe"] == '"/usr/bin/true"'
-    assert entry["StartDir"] == '"/usr/bin/"'
-    expected = steam_shortcuts.shortcut_app_id(
-        "/usr/bin/true", "ROTK Launcher"
-    )
-    assert entry["appid"] & 0xFFFFFFFF == expected
+    assert entry.string("Exe") == '"/usr/bin/true"'
+    assert entry.string("StartDir") == '"/usr/bin/"'
+    expected = ShortcutEntry.app_id_for("/usr/bin/true", "ROTK Launcher")
+    assert entry.integer("appid") & 0xFFFFFFFF == expected
 
 
 def test_a_shortcut_without_a_target_is_given_one(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     steam = _existing(tmp_path, "sul rotk-launcher --tpm -- %command%")
-    data = vdf.binary_loads(_shortcuts_path(tmp_path).read_bytes())
-    data["shortcuts"]["0"]["Exe"] = ""
-    data["shortcuts"]["0"]["StartDir"] = ""
-    _shortcuts_path(tmp_path).write_bytes(vdf.binary_dumps(data))
-    app_id = data["shortcuts"]["0"]["appid"]
+    data = _saved(tmp_path)
+    broken = data.section("shortcuts", "0")
+    broken["Exe"] = ""
+    broken["StartDir"] = ""
+    _shortcuts_path(tmp_path).write_bytes(data.to_binary())
+    app_id = broken.integer("appid")
     assert _ensure(steam)
-    after = vdf.binary_loads(_shortcuts_path(tmp_path).read_bytes())
-    entry = after["shortcuts"]["0"]
-    assert entry["Exe"] == '"/usr/bin/true"'
-    assert entry["appid"] == app_id  # the id never changes
-    assert entry["LaunchOptions"] == "sul rotk-launcher --tpm -- %command%"
+    entry = _entry_at(tmp_path)
+    assert entry.string("Exe") == '"/usr/bin/true"'
+    assert entry.integer("appid") == app_id  # the id never changes
+    assert (
+        entry.string("LaunchOptions") == "sul rotk-launcher --tpm -- %command%"
+    )
     assert "Updated the target" in capsys.readouterr().out
 
 
@@ -655,3 +707,82 @@ def test_a_game_steam_has_no_images_for_gives_the_shortcut_none(
     assert not (
         tmp_path / "userdata" / str(ACCOUNT) / "config" / "grid"
     ).exists()
+
+
+# --- Steam runs this program itself (Windows)
+
+_WINDOWS_PROGRAM = ["C:\\Tools\\sul.exe"]
+
+
+def _direct(steam: Steam, *, options: list[str]) -> int:
+    return _ensure(
+        steam, program=_WINDOWS_PROGRAM, style=DirectStyle(), options=options
+    )
+
+
+def test_a_direct_shortcut_runs_this_program_and_needs_no_tool(
+    tmp_path: Path,
+) -> None:
+    steam = _steam(tmp_path)  # no compatibility tools at all
+    config_path = tmp_path / "config" / "config.vdf"
+    config_before = config_path.read_text()
+    assert _direct(steam, options=["--force"])
+    entry = _entry_at(tmp_path)
+    assert entry.string("Exe") == '"C:\\Tools\\sul.exe"'
+    assert entry.string("StartDir") == '"C:\\Tools\\"'
+    assert (
+        entry.string("LaunchOptions")
+        == "rotk-launcher --run-from-steam --force"
+    )
+    expected = ShortcutEntry.app_id_for("C:\\Tools\\sul.exe", "ROTK Launcher")
+    assert entry.integer("appid") & 0xFFFFFFFF == expected
+    # The tool mapping is for Proton, so the config is not touched or saved.
+    assert config_path.read_text() == config_before
+    assert not list((tmp_path / "config").glob("config.vdf.sul-backup-*"))
+
+
+def test_a_direct_shortcut_has_its_options_updated_in_place(
+    tmp_path: Path,
+) -> None:
+    steam = _steam(tmp_path)
+    assert _direct(steam, options=["--force"])
+    assert _direct(steam, options=["--tpm"])
+    assert _launch_options_of(tmp_path) == [
+        "rotk-launcher --run-from-steam --tpm"
+    ]
+
+
+def test_a_direct_shortcut_given_the_same_options_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    steam = _steam(tmp_path)
+    assert _direct(steam, options=["--force"])
+    before = _shortcuts_path(tmp_path).read_bytes()
+    assert _direct(steam, options=["--force"])
+    assert _shortcuts_path(tmp_path).read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("current", "expected"),
+    [
+        ("rotk-launcher --run-from-steam", []),
+        ("rotk-launcher --run-from-steam --force", ["--force"]),
+        ("rotk-launcher --force", None),  # no marker: not our form
+        ("something else", None),
+    ],
+)
+def test_the_options_of_a_direct_shortcut_are_read(
+    current: str, expected: list[str] | None
+) -> None:
+    assert DirectStyle().options_in(current, "rotk-launcher") == expected
+
+
+def test_a_program_run_as_a_module_keeps_its_arguments_in_direct_options() -> (
+    None
+):
+    style = DirectStyle()
+    program = ["C:\\Python\\python.exe", "-m", "steam_utility_launcher"]
+    assert style.exe(program) == "C:\\Python\\python.exe"
+    assert style.launch_options(program, "rotk-launcher", ["--force"]) == (
+        "-m steam_utility_launcher rotk-launcher --run-from-steam --force"
+    )

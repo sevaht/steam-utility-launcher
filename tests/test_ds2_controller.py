@@ -1,24 +1,32 @@
 from __future__ import annotations
 
 import logging
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypedDict, Unpack
 
 import pytest
 
 from steam_utility_launcher import application, ds2_controller
-from steam_utility_launcher.steam import Steam, SteamError, SteamLocation
+from steam_utility_launcher.host import LinuxHost
+from steam_utility_launcher.steam import (
+    Steam,
+    SteamClient,
+    SteamError,
+    SteamLocation,
+)
 from steam_utility_launcher.steam_input import (
     CONTROLLER_TYPES,
     ControllerConfigs,
     ControllerLayout,
+    ControllerType,
     parse_controller_type,
     plan_layouts,
     selected_template,
 )
 
+from .steam_helper import make_location
+
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
 
 CREATOR = 76561197969290206
@@ -59,27 +67,39 @@ def steam(
     config = tmp_path / "config"
     config.mkdir()
     (config / "loginusers.vdf").write_text(LOGIN_USERS, encoding="utf-8")
+    monkeypatch.setattr(SteamClient, "is_running", staticmethod(lambda: False))
     monkeypatch.setattr(
-        SteamLocation, "is_client_running", staticmethod(lambda: False)
+        SteamClient, "shut_down", lambda _self: calls.events.append("closed")
     )
     monkeypatch.setattr(
-        SteamLocation,
-        "shut_down_client",
-        lambda _self: calls.events.append("closed"),
+        SteamClient, "start", lambda _self: calls.events.append("started")
     )
-    monkeypatch.setattr(
-        SteamLocation,
-        "start_client",
-        lambda _self: calls.events.append("started"),
+    return Steam(location=make_location(tmp_path), compatibility_tools=[])
+
+
+class _Asked(TypedDict, total=False):
+    """What a test asks `ds2-controller` for besides the Steam it is run on."""
+
+    layout_file: Path | None
+    controller_types: Sequence[ControllerType]
+    keep_device_choices: bool
+    assume_yes: bool
+    dry_run: bool
+    restart: bool
+    ask: Callable[[str], str]
+
+
+def _run(steam: Steam, **asked: Unpack[_Asked]) -> None:
+    request = ds2_controller.ControllerRequest(
+        location=steam.location,
+        client=SteamClient(steam.location, LinuxHost()),
+        **asked,
     )
-    location = SteamLocation(root=tmp_path, system_config_dirs=[])
-    return cast("Steam", SimpleNamespace(location=location))
+    ds2_controller.LayoutInstaller(request).run()
 
 
 def _running(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        SteamLocation, "is_client_running", staticmethod(lambda: True)
-    )
+    monkeypatch.setattr(SteamClient, "is_running", staticmethod(lambda: True))
 
 
 def _configs(steam: Steam) -> ControllerConfigs:
@@ -98,7 +118,7 @@ def _no_input(_prompt: str) -> str:
 def test_sets_up_a_layout_for_a_game_that_has_none(
     steam: Steam, calls: _Calls, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert ds2_controller.run(steam=steam, ask=_no_input) == 0
+    _run(steam, ask=_no_input)
     layout = ControllerLayout.bundled()
     assert _selected(steam) == f"CLOUD_{APP}/{layout.name}"
     path = _configs(steam).layout_path(APP, layout)
@@ -115,10 +135,10 @@ def test_leaves_it_be_when_steam_already_uses_it(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    ds2_controller.run(steam=steam, ask=_no_input)
+    _run(steam, ask=_no_input)
     capsys.readouterr()
     _running(monkeypatch)  # even with Steam up, nothing needs closing
-    assert ds2_controller.run(steam=steam, ask=_no_input) == 0
+    _run(steam, ask=_no_input)
     assert calls.events == []
     assert "already uses" in capsys.readouterr().out
     assert not list(_configs(steam).directory.rglob("*.sul-backup-*"))
@@ -134,7 +154,7 @@ def test_closes_steam_to_change_it_and_starts_it_again(
         asked.append(prompt)
         return "y"
 
-    assert ds2_controller.run(steam=steam, ask=ask) == 0
+    _run(steam, ask=ask)
     assert len(asked) == 1
     assert "controller layout" in asked[0]
     assert calls.events == ["closed", "started"]
@@ -145,7 +165,7 @@ def test_a_yes_closes_steam_without_asking(
     steam: Steam, calls: _Calls, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _running(monkeypatch)
-    assert ds2_controller.run(steam=steam, assume_yes=True, ask=_no_input) == 0
+    _run(steam, assume_yes=True, ask=_no_input)
     assert calls.events == ["closed", "started"]
 
 
@@ -156,28 +176,19 @@ def test_steam_can_be_left_closed(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _running(monkeypatch)
-    assert (
-        ds2_controller.run(
-            steam=steam, assume_yes=True, restart=False, ask=_no_input
-        )
-        == 0
-    )
+    _run(steam, assume_yes=True, restart=False, ask=_no_input)
     assert calls.events == ["closed"]
     assert "Start Steam again" in capsys.readouterr().out
 
 
 def test_changes_nothing_if_steam_is_not_allowed_to_close(
-    steam: Steam,
-    calls: _Calls,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    steam: Steam, calls: _Calls, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _running(monkeypatch)
-    with caplog.at_level(logging.ERROR):
-        assert ds2_controller.run(steam=steam, ask=lambda _p: "n") == 1
+    with pytest.raises(SteamError, match="Close Steam"):
+        _run(steam, ask=lambda _p: "n")
     assert calls.events == []
     assert not _configs(steam).directory.exists()
-    assert "Close Steam" in caplog.text
 
 
 def test_a_dry_run_changes_nothing_and_leaves_steam_up(
@@ -187,7 +198,7 @@ def test_a_dry_run_changes_nothing_and_leaves_steam_up(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _running(monkeypatch)
-    assert ds2_controller.run(steam=steam, dry_run=True, ask=_no_input) == 0
+    _run(steam, dry_run=True, ask=_no_input)
     assert calls.events == []
     assert not _configs(steam).directory.exists()
     output = capsys.readouterr().out
@@ -205,7 +216,7 @@ def test_says_what_it_was_choosing_instead(
         '\t\t"template"\t\t"CLOUD_335300/other_0"\n\t}\n}\n',
         encoding="utf-8",
     )
-    assert ds2_controller.run(steam=steam, ask=_no_input) == 0
+    _run(steam, ask=_no_input)
     output = capsys.readouterr().out
     assert "was CLOUD_335300/other_0" in output
     assert "Backed up: configset_controller_generic.vdf.sul-backup-" in output
@@ -221,34 +232,30 @@ def test_uses_a_layout_file_of_the_users_instead(
         ),
         encoding="utf-8",
     )
-    assert (
-        ds2_controller.run(steam=steam, layout_file=mine, ask=_no_input) == 0
-    )
+    _run(steam, layout_file=mine, ask=_no_input)
     assert _selected(steam) == "CLOUD_335300/my own layout_0"
 
 
 def test_a_layout_file_that_is_not_one_is_an_error(
-    steam: Steam, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    steam: Steam, tmp_path: Path
 ) -> None:
     junk = tmp_path / "junk.vdf"
     junk.write_text("not a layout", encoding="utf-8")
-    with caplog.at_level(logging.ERROR):
-        assert ds2_controller.run(steam=steam, layout_file=junk) == 1
-    assert "Could not set the layout" in caplog.text
+    with pytest.raises(SteamError, match="controller_type"):
+        _run(steam, layout_file=junk)
     assert not _configs(steam).directory.exists()
 
 
 def test_steam_with_no_accounts_is_an_error(
-    steam: Steam, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    steam: Steam, tmp_path: Path
 ) -> None:
     (tmp_path / "config" / "loginusers.vdf").unlink()
-    with caplog.at_level(logging.ERROR):
-        assert ds2_controller.run(steam=steam) == 1
-    assert "Could not read Steam's accounts" in caplog.text
+    with pytest.raises(SteamError, match="Could not read Steam's accounts"):
+        _run(steam)
 
 
 def test_what_it_writes_is_what_a_second_run_finds_done(steam: Steam) -> None:
-    ds2_controller.run(steam=steam, ask=_no_input)
+    _run(steam, ask=_no_input)
     base = ControllerLayout.bundled()
     assert (
         plan_layouts(
@@ -261,24 +268,23 @@ def test_what_it_writes_is_what_a_second_run_finds_done(steam: Steam) -> None:
     )
 
 
-def test_a_steam_that_cannot_say_the_account_is_an_error(
-    steam: Steam, caplog: pytest.LogCaptureFixture
-) -> None:
-    def fail() -> int:
+class _UnknownAccount(SteamLocation):
+    """A Steam that can't say which account is in use."""
+
+    def account_steam_id(self) -> int:
         msg = "Could not tell which Steam account is in use"
         raise SteamError(msg)
 
-    broken = cast(
-        "Steam",
-        SimpleNamespace(
-            location=SimpleNamespace(
-                account_directory=lambda: steam.location.root,
-                account_steam_id=fail,
-            )
+
+def test_a_steam_that_cannot_say_the_account_is_an_error(steam: Steam) -> None:
+    broken = Steam(
+        location=_UnknownAccount(
+            root=steam.location.root, system_config_dirs=[]
         ),
+        compatibility_tools=[],
     )
-    with caplog.at_level(logging.ERROR):
-        assert ds2_controller.run(steam=broken) == 1
+    with pytest.raises(SteamError, match="which Steam account"):
+        _run(broken)
 
 
 # --- the command line
@@ -289,19 +295,15 @@ def test_the_command_is_wired_into_the_launcher(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(Steam, "from_detection", staticmethod(lambda: steam))
+    monkeypatch.setattr(
+        SteamLocation,
+        "from_detection",
+        staticmethod(lambda _host=None: steam.location),
+    )
     assert application.main(["ds2-controller", "--dry-run"]) == 0
     assert "dry run" in capsys.readouterr().out
     assert application.main(["ds2-controller", "-y"]) == 0
     assert _selected(steam) is not None
-
-
-def test_off_linux_there_are_no_layouts_to_set(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("sys.platform", "win32")
-    with pytest.raises(SystemExit):
-        application.main(["ds2-controller"])
 
 
 # --- every kind of controller
@@ -317,7 +319,7 @@ def _selected_for(steam: Steam, controller_type: str) -> str | None:
 def test_sets_the_layout_for_every_kind_of_controller_by_default(
     steam: Steam, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert ds2_controller.run(steam=steam, ask=_no_input) == 0
+    _run(steam, ask=_no_input)
     base = ControllerLayout.bundled()
     for kind in CONTROLLER_TYPES:
         layout = base.for_type(kind)
@@ -329,7 +331,7 @@ def test_sets_the_layout_for_every_kind_of_controller_by_default(
 
 
 def test_the_layouts_for_the_kinds_are_the_same_buttons(steam: Steam) -> None:
-    ds2_controller.run(steam=steam, ask=_no_input)
+    _run(steam, ask=_no_input)
     base = ControllerLayout.bundled()
     reference = base.text.count("key_press")
     for kind in CONTROLLER_TYPES:
@@ -344,10 +346,7 @@ def test_it_can_be_limited_to_some_kinds(
     steam: Steam, capsys: pytest.CaptureFixture[str]
 ) -> None:
     kinds = [parse_controller_type("ps5"), parse_controller_type("generic")]
-    assert (
-        ds2_controller.run(steam=steam, controller_types=kinds, ask=_no_input)
-        == 0
-    )
+    _run(steam, controller_types=kinds, ask=_no_input)
     assert _selected_for(steam, "controller_ps5") is not None
     assert _selected_for(steam, "controller_generic") is not None
     assert _selected_for(steam, "controller_xboxone") is None
@@ -359,9 +358,9 @@ def test_a_second_run_for_more_kinds_adds_only_those(
     steam: Steam, capsys: pytest.CaptureFixture[str]
 ) -> None:
     first = [parse_controller_type("generic")]
-    ds2_controller.run(steam=steam, controller_types=first, ask=_no_input)
+    _run(steam, controller_types=first, ask=_no_input)
     capsys.readouterr()
-    assert ds2_controller.run(steam=steam, ask=_no_input) == 0
+    _run(steam, ask=_no_input)
     output = capsys.readouterr().out
     assert "controller_generic" not in output.split("Steam uses")[0]
     assert "controller_ps5" in output
@@ -385,7 +384,7 @@ def test_a_choice_for_one_controller_that_could_win_is_pointed_out(
     steam: Steam, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _device_choice(steam, "CLOUD_335300/someone elses_0")
-    assert ds2_controller.run(steam=steam, ask=_no_input) == 0
+    _run(steam, ask=_no_input)
     output = capsys.readouterr().out
     assert "configset_2dc8-310a-89b3de.vdf" in output
     assert "CLOUD_335300/someone elses_0" in output
@@ -397,7 +396,7 @@ def test_a_choice_for_one_controller_of_this_layout_is_not_a_concern(
 ) -> None:
     layout = ControllerLayout.bundled()
     _device_choice(steam, f"CLOUD_{APP}/{layout.name}")
-    assert ds2_controller.run(steam=steam, ask=_no_input) == 0
+    _run(steam, ask=_no_input)
     assert "particular controllers" not in capsys.readouterr().out
 
 
@@ -405,17 +404,17 @@ def test_the_choice_for_one_controller_is_pointed_out_in_a_dry_run_too(
     steam: Steam, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _device_choice(steam, "CLOUD_335300/other_0")
-    assert ds2_controller.run(steam=steam, dry_run=True) == 0
+    _run(steam, dry_run=True)
     assert "may take priority" in capsys.readouterr().out
 
 
 def test_the_choice_for_one_controller_is_pointed_out_when_all_is_set(
     steam: Steam, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    ds2_controller.run(steam=steam, ask=_no_input)
+    _run(steam, ask=_no_input)
     _device_choice(steam, "CLOUD_335300/other_0")
     capsys.readouterr()
-    assert ds2_controller.run(steam=steam, ask=_no_input) == 0
+    _run(steam, ask=_no_input)
     output = capsys.readouterr().out
     assert "already uses" in output
     assert "may take priority" in output
@@ -427,7 +426,11 @@ def test_the_choice_for_one_controller_is_pointed_out_when_all_is_set(
 def test_the_command_line_limits_the_kinds(
     steam: Steam, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(Steam, "from_detection", staticmethod(lambda: steam))
+    monkeypatch.setattr(
+        SteamLocation,
+        "from_detection",
+        staticmethod(lambda _host=None: steam.location),
+    )
     arguments = [
         "ds2-controller",
         "-y",
@@ -445,7 +448,11 @@ def test_the_command_line_limits_the_kinds(
 def test_the_command_line_refuses_a_kind_there_is_not(
     steam: Steam, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(Steam, "from_detection", staticmethod(lambda: steam))
+    monkeypatch.setattr(
+        SteamLocation,
+        "from_detection",
+        staticmethod(lambda _host=None: steam.location),
+    )
     with pytest.raises(SystemExit):
         application.main(["ds2-controller", "--controller-type", "atari"])
 
@@ -467,7 +474,7 @@ def test_a_choice_for_one_controller_is_changed_to_this_layout(
 ) -> None:
     _saved_layout(steam, "old layout_0", "controller_generic")
     _device_choice(steam, "CLOUD_335300/old layout_0")
-    assert ds2_controller.run(steam=steam, ask=_no_input) == 0
+    _run(steam, ask=_no_input)
     device = _configs(steam).directory / "configset_2dc8-310a-89b3de.vdf"
     layout = ControllerLayout.bundled()
     assert selected_template(device.read_text(encoding="utf-8"), APP) == (
@@ -487,9 +494,9 @@ def test_a_second_run_finds_the_controller_done_too(
 ) -> None:
     _saved_layout(steam, "old layout_0", "controller_generic")
     _device_choice(steam, "CLOUD_335300/old layout_0")
-    ds2_controller.run(steam=steam, ask=_no_input)
+    _run(steam, ask=_no_input)
     capsys.readouterr()
-    assert ds2_controller.run(steam=steam, ask=_no_input) == 0
+    _run(steam, ask=_no_input)
     assert "already uses" in capsys.readouterr().out
 
 
@@ -500,12 +507,7 @@ def test_a_choice_for_one_controller_can_be_left_as_it_is(
     _device_choice(steam, "CLOUD_335300/old layout_0")
     device = _configs(steam).directory / "configset_2dc8-310a-89b3de.vdf"
     before = device.read_text(encoding="utf-8")
-    assert (
-        ds2_controller.run(
-            steam=steam, keep_device_choices=True, ask=_no_input
-        )
-        == 0
-    )
+    _run(steam, keep_device_choices=True, ask=_no_input)
     assert device.read_text(encoding="utf-8") == before
     output = capsys.readouterr().out
     assert (
@@ -522,7 +524,7 @@ def test_a_dry_run_says_which_controller_would_change(
     _device_choice(steam, "CLOUD_335300/old layout_0")
     device = _configs(steam).directory / "configset_2dc8-310a-89b3de.vdf"
     before = device.read_text(encoding="utf-8")
-    assert ds2_controller.run(steam=steam, dry_run=True) == 0
+    _run(steam, dry_run=True)
     assert device.read_text(encoding="utf-8") == before
     assert "for the controller in configset_2dc8-310a-89b3de.vdf" in (
         capsys.readouterr().out
@@ -532,19 +534,23 @@ def test_a_dry_run_says_which_controller_would_change(
 def test_only_a_controller_choice_to_change_still_closes_steam(
     steam: Steam, calls: _Calls, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ds2_controller.run(steam=steam, ask=_no_input)
+    _run(steam, ask=_no_input)
     _saved_layout(steam, "old layout_0", "controller_generic")
     _device_choice(steam, "CLOUD_335300/old layout_0")
     _running(monkeypatch)
     calls.events.clear()
-    assert ds2_controller.run(steam=steam, assume_yes=True) == 0
+    _run(steam, assume_yes=True)
     assert calls.events == ["closed", "started"]
 
 
 def test_the_command_line_can_leave_controller_choices(
     steam: Steam, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(Steam, "from_detection", staticmethod(lambda: steam))
+    monkeypatch.setattr(
+        SteamLocation,
+        "from_detection",
+        staticmethod(lambda _host=None: steam.location),
+    )
     _saved_layout(steam, "old layout_0", "controller_generic")
     _device_choice(steam, "CLOUD_335300/old layout_0")
     device = _configs(steam).directory / "configset_2dc8-310a-89b3de.vdf"

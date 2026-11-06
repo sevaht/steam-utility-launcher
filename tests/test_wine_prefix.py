@@ -5,8 +5,7 @@ import re
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
-import vdf  # type: ignore[import-untyped]
-
+from steam_utility_launcher.keyvalues import Section
 from steam_utility_launcher.wine_prefix import (
     WinePrefix,
     is_wine_builtin,
@@ -138,10 +137,10 @@ def test_a_symlink_is_replaced_and_what_it_pointed_to_is_not_touched(
 
 def test_wine_path_uses_the_z_drive() -> None:
     assert (
-        wine_path(PurePosixPath("/home/me/.local/x.log"))  # type: ignore[arg-type]
+        wine_path(PurePosixPath("/home/me/.local/x.log"))
         == "Z:\\home\\me\\.local\\x.log"
     )
-    assert wine_path(PurePosixPath("/")) == "Z:\\"  # type: ignore[arg-type]
+    assert wine_path(PurePosixPath("/")) == "Z:\\"
 
 
 def test_the_stand_in_is_named_as_a_windows_program_names_it() -> None:
@@ -155,13 +154,15 @@ def test_a_steam_library_is_listed_in_the_prefix_with_its_z_path(
 ) -> None:
     prefix = WinePrefix(tmp_path / "pfx")
     library = PurePosixPath("/mnt/storage/SteamLibrary")
-    prefix.list_steam_library(library, ["433850"])  # type: ignore[arg-type]
+    prefix.list_steam_library(library, ["433850"])
     listing = (
         prefix.program_files / "Steam" / "steamapps" / "libraryfolders.vdf"
     )
-    entry = vdf.loads(listing.read_text())["libraryfolders"]["0"]
-    assert entry["path"] == "Z:\\mnt\\storage\\SteamLibrary"
-    assert entry["apps"] == {"433850": "0"}
+    entry = Section.from_text(listing.read_text()).section(
+        "libraryfolders", "0"
+    )
+    assert entry.string("path") == "Z:\\mnt\\storage\\SteamLibrary"
+    assert entry.section("apps") == {"433850": "0"}
 
 
 def test_the_library_list_can_be_read_the_way_rotk_launcher_reads_it(
@@ -171,7 +172,7 @@ def test_the_library_list_can_be_read_the_way_rotk_launcher_reads_it(
     regular expression and unescapes the backslashes."""
     prefix = WinePrefix(tmp_path / "pfx")
     library = PurePosixPath("/mnt/storage/SteamLibrary")
-    prefix.list_steam_library(library, ["433850"])  # type: ignore[arg-type]
+    prefix.list_steam_library(library, ["433850"])
     text = (
         prefix.program_files / "Steam" / "steamapps" / "libraryfolders.vdf"
     ).read_text()
@@ -187,15 +188,14 @@ def test_the_library_list_can_be_read_the_way_rotk_launcher_reads_it(
 def test_an_unchanged_library_list_is_left_alone(tmp_path: Path) -> None:
     prefix = WinePrefix(tmp_path / "pfx")
     library = PurePosixPath("/lib")
-    prefix.list_steam_library(library, ["1"])  # type: ignore[arg-type]
+    prefix.list_steam_library(library, ["1"])
     listing = (
         prefix.program_files / "Steam" / "steamapps" / "libraryfolders.vdf"
     )
     before = listing.stat().st_mtime_ns
-    prefix.list_steam_library(library, ["1"])  # type: ignore[arg-type]
+    prefix.list_steam_library(library, ["1"])
     assert listing.stat().st_mtime_ns == before
-    prefix.list_steam_library(library, ["1", "2"])  # type: ignore[arg-type]
-    assert vdf.loads(listing.read_text())["libraryfolders"]["0"]["apps"] == {
-        "1": "0",
-        "2": "0",
-    }
+    prefix.list_steam_library(library, ["1", "2"])
+    assert Section.from_text(listing.read_text()).section(
+        "libraryfolders", "0", "apps"
+    ) == {"1": "0", "2": "0"}
