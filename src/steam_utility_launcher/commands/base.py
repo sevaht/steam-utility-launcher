@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from steam_utility_launcher.errors import UserError
 from steam_utility_launcher.steam import (
     CompatSession,
     Steam,
@@ -75,6 +76,8 @@ class Command(ABC):
 
     name: str
     help: str
+    # Other names the subcommand answers to.
+    aliases: tuple[str, ...] = ()
     # Why the command is only for systems that run Windows programs with
     # Proton, if it is.
     proton_only_because: str | None = None
@@ -96,3 +99,37 @@ class Command(ABC):
     def run(self, args: argparse.Namespace, context: Context) -> int:
         """Does it, and returns the exit status. Raises UsageError for
         arguments that can't be used together."""
+
+
+class CommandGroup(Command):
+    """A subcommand made of subcommands: `group name <subcommand> ...`."""
+
+    subcommands: Sequence[Command]
+
+    def _dest(self) -> str:
+        return f"{self.name}_subcommand"
+
+    def add_arguments(
+        self, parser: argparse.ArgumentParser, host: Host
+    ) -> None:
+        subparsers = parser.add_subparsers(dest=self._dest(), required=True)
+        for command in self.subcommands:
+            command.add_arguments(
+                subparsers.add_parser(
+                    command.name, aliases=command.aliases, help=command.help
+                ),
+                host,
+            )
+
+    def run(self, args: argparse.Namespace, context: Context) -> int:
+        chosen = getattr(args, self._dest())
+        command = next(
+            command
+            for command in self.subcommands
+            if chosen in (command.name, *command.aliases)
+        )
+        reason = command.unsupported_reason(context.host)
+        if reason is not None:
+            msg = f"{self.name} {command.name} can't be used here. {reason}"
+            raise UserError(msg)
+        return command.run(args, context)

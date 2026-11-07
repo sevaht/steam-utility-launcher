@@ -605,6 +605,21 @@ class Steam:
                 return library
         return self.location.root
 
+    def game_install_path(self, *, game_id: str) -> Path:
+        """The folder Steam installed the game in."""
+        library = self.game_library_path(game_id=game_id)
+        manifest = library / "steamapps" / f"appmanifest_{game_id}.acf"
+        try:
+            name = Section.from_text_file(manifest).string(
+                "AppState", "installdir"
+            )
+        except (OSError, KeyValuesError) as error:
+            msg = (
+                f"Could not find where Steam installed game {game_id}: {error}"
+            )
+            raise SteamError(msg) from error
+        return library / "steamapps" / "common" / name
+
     def game_compatdata_path(self, *, game_id: str) -> Path:
         return (
             self.game_library_path(game_id=game_id)

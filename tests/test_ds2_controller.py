@@ -78,7 +78,7 @@ def steam(
 
 
 class _Asked(TypedDict, total=False):
-    """What a test asks `ds2-controller` for besides the Steam it is run on."""
+    """What a test asks `ds2 controller` for besides the Steam it is run on."""
 
     layout_file: Path | None
     controller_types: Sequence[ControllerType]
@@ -300,9 +300,9 @@ def test_the_command_is_wired_into_the_launcher(
         "from_detection",
         staticmethod(lambda _host=None: steam.location),
     )
-    assert application.main(["ds2-controller", "--dry-run"]) == 0
+    assert application.main(["ds2", "controller", "--dry-run"]) == 0
     assert "dry run" in capsys.readouterr().out
-    assert application.main(["ds2-controller", "-y"]) == 0
+    assert application.main(["ds2", "controller", "-y"]) == 0
     assert _selected(steam) is not None
 
 
@@ -432,7 +432,8 @@ def test_the_command_line_limits_the_kinds(
         staticmethod(lambda _host=None: steam.location),
     )
     arguments = [
-        "ds2-controller",
+        "ds2",
+        "controller",
         "-y",
         "--controller-type",
         "ps5",
@@ -454,7 +455,7 @@ def test_the_command_line_refuses_a_kind_there_is_not(
         staticmethod(lambda _host=None: steam.location),
     )
     with pytest.raises(SystemExit):
-        application.main(["ds2-controller", "--controller-type", "atari"])
+        application.main(["ds2", "controller", "--controller-type", "atari"])
 
 
 # --- choices for particular controllers are changed too
@@ -556,9 +557,9 @@ def test_the_command_line_can_leave_controller_choices(
     device = _configs(steam).directory / "configset_2dc8-310a-89b3de.vdf"
     before = device.read_text(encoding="utf-8")
     assert (
-        application.main(["ds2-controller", "-y", "--keep-device-choices"])
+        application.main(["ds2", "controller", "-y", "--keep-device-choices"])
         == 0
     )
     assert device.read_text(encoding="utf-8") == before
-    assert application.main(["ds2-controller", "-y"]) == 0
+    assert application.main(["ds2", "controller", "-y"]) == 0
     assert device.read_text(encoding="utf-8") != before

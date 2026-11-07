@@ -98,7 +98,7 @@ def game_closed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _Asked(TypedDict, total=False):
-    """What a test asks `ds2-bindings` for."""
+    """What a test asks `ds2 bindings` for."""
 
     save: Path | None
     config: Path | None
@@ -542,14 +542,22 @@ def test_does_not_see_the_game_when_it_is_not_there() -> None:
 def test_the_command_is_wired_into_the_launcher(
     save: Path, config: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    arguments = ["ds2-bindings", "--save", str(save), "--config", str(config)]
+    arguments = [
+        "ds2",
+        "bindings",
+        "--save",
+        str(save),
+        "--config",
+        str(config),
+    ]
     assert application.main([*arguments, "--dry-run"]) == 0
     assert _controls(save).keyboard == START_KEYBOARD
     assert application.main(arguments) == 0
     assert _controls(save).keyboard == WANTED_KEYBOARD
     capsys.readouterr()
     assert (
-        application.main(["ds2-bindings", "--save", str(save), "--show"]) == 0
+        application.main(["ds2", "bindings", "--save", str(save), "--show"])
+        == 0
     )
     assert 'function_1 = "P"' in capsys.readouterr().out
 
@@ -752,7 +760,8 @@ def test_a_save_made_with_no_config_has_the_bundled_scheme(
 def test_the_command_line_makes_a_save(tmp_path: Path, config: Path) -> None:
     path = tmp_path / ds2_bindings.SAVE_FILE_NAME
     arguments = [
-        "ds2-bindings",
+        "ds2",
+        "bindings",
         "--create",
         "--save",
         str(path),
@@ -781,7 +790,7 @@ def test_the_command_line_refuses_options_that_make_no_sense(
 ) -> None:
     with pytest.raises(SystemExit):
         application.main(
-            ["ds2-bindings", "--save", str(tmp_path / "x.sl2"), *arguments]
+            ["ds2", "bindings", "--save", str(tmp_path / "x.sl2"), *arguments]
         )
 
 
@@ -792,7 +801,7 @@ def test_on_windows_the_save_is_in_the_roaming_app_data(
     monkeypatch.setattr(
         ds2_bindings, "game_is_running", lambda _host=None: False
     )
-    arguments = ["ds2-bindings", "--config", str(config)]
+    arguments = ["ds2", "bindings", "--config", str(config)]
     host = WindowsHost()
     assert (
         application.main(
@@ -825,7 +834,7 @@ def test_on_windows_a_new_save_is_for_the_account_that_signed_in_last(
     )
     assert (
         application.main(
-            ["ds2-bindings", "--create", "--config", str(config)],
+            ["ds2", "bindings", "--create", "--config", str(config)],
             host=WindowsHost(),
         )
         == 0

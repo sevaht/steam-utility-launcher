@@ -35,7 +35,7 @@ def _restore_logging() -> Iterator[None]:
 def test_every_command_has_its_own_name() -> None:
     names = [command.name for command in default_commands()]
     assert len(names) == len(set(names))
-    assert {"rotk-launcher", "ds2-bindings", "proton", "zemu"} <= set(names)
+    assert {"rotk-launcher", "ds2", "proton", "zemu"} <= set(names)
 
 
 @pytest.mark.parametrize("host", [LinuxHost(), WindowsHost()])
@@ -167,7 +167,9 @@ def test_the_controller_layout_command_works_on_windows(
         seen.append(self.request)
 
     monkeypatch.setattr(ds2_controller.LayoutInstaller, "run", run)
-    assert application.main(["ds2-controller", "-y"], host=WindowsHost()) == 0
+    assert (
+        application.main(["ds2", "controller", "-y"], host=WindowsHost()) == 0
+    )
     (request,) = seen
     assert request.location.root == tmp_path
     assert request.client.host.name == "windows"
@@ -190,7 +192,7 @@ def test_a_failure_is_reported_once_as_a_message_with_no_traceback(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _failing_installer(monkeypatch, SteamError("Steam is stuck"))
-    assert application.main(["ds2-controller"], host=WindowsHost()) == 1
+    assert application.main(["ds2", "controller"], host=WindowsHost()) == 1
     err = capsys.readouterr().err
     assert err.strip() == "ERROR: Could not set the layout: Steam is stuck"
 
@@ -200,10 +202,10 @@ def test_a_failure_puts_its_traceback_in_the_log_file(
 ) -> None:
     _failing_installer(monkeypatch, SteamError("Steam is stuck"))
     log = tmp_path / "sul.log"
-    arguments = ["--log-file", str(log), "ds2-controller"]
+    arguments = ["--log-file", str(log), "ds2", "controller"]
     assert application.main(arguments, host=WindowsHost()) == 1
     text = log.read_text()
-    assert "ds2-controller failed" in text
+    assert "ds2 failed" in text
     assert "Traceback" in text
     assert "Steam is stuck" in text
 
@@ -215,7 +217,7 @@ def test_the_errors_a_command_expects_get_the_commands_context(
     error: Exception,
 ) -> None:
     _failing_installer(monkeypatch, error)
-    assert application.main(["ds2-controller"], host=WindowsHost()) == 1
+    assert application.main(["ds2", "controller"], host=WindowsHost()) == 1
     assert f"Could not set the layout: {error}" in capsys.readouterr().err
 
 
@@ -224,7 +226,7 @@ def test_an_error_nobody_expected_is_not_hidden(
 ) -> None:
     _failing_installer(monkeypatch, KeyError("a bug"))
     with pytest.raises(KeyError):
-        application.main(["ds2-controller"], host=WindowsHost())
+        application.main(["ds2", "controller"], host=WindowsHost())
 
 
 def test_the_console_shows_the_exception_for_anything_but_a_user_error() -> (

@@ -148,7 +148,10 @@ def _build_parser(
     subparsers = parser.add_subparsers(dest="mode", required=True)
     for command in commands:
         command.add_arguments(
-            subparsers.add_parser(command.name, help=command.help), host
+            subparsers.add_parser(
+                command.name, aliases=command.aliases, help=command.help
+            ),
+            host,
         )
     return parser
 
@@ -177,7 +180,9 @@ def main(
         ),
     )
     command = next(
-        command for command in commands if command.name == args.mode
+        command
+        for command in commands
+        if args.mode in (command.name, *command.aliases)
     )
     reason = command.unsupported_reason(host)
     if reason is not None:

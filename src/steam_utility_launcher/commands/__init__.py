@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 from steam_utility_launcher.commands.base import Command, Context, UsageError
-from steam_utility_launcher.commands.ds2_commands import (
-    Ds2BindingsCommand,
-    Ds2ControllerCommand,
-)
+from steam_utility_launcher.commands.ds2_commands import Ds2Command
 from steam_utility_launcher.commands.prefix_commands import (
     ManualCommand,
     PrefixPathCommand,
@@ -40,7 +37,6 @@ def default_commands() -> list[Command]:
         RotkLauncherCommand(),
         ProtonCommand(),
         ZEmuCommand(),
-        Ds2BindingsCommand(),
-        Ds2ControllerCommand(),
+        Ds2Command(),
         HwidAccessCommand(),
     ]

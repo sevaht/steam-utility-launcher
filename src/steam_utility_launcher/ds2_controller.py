@@ -73,7 +73,7 @@ def _print_warnings(warnings: list[str]) -> None:
 
 @dataclass(frozen=True, kw_only=True)
 class ControllerRequest:
-    """What `ds2-controller` was asked to do."""
+    """What `ds2 controller` was asked to do."""
 
     location: SteamLocation
     client: SteamClient

@@ -1,4 +1,4 @@
-# Dark Souls II: Scholar of the First Sin controls, as `ds2-bindings` sets
+# Dark Souls II: Scholar of the First Sin controls, as `ds2 bindings` sets
 # them. Every action in the game's keyboard and mouse tables is listed, by name.
 #
 # An action is set to a key (or mouse button) by name, or by number, which is
@@ -7,7 +7,7 @@
 # or Ctrl) with one, give a table:
 #   toggle_menu_left = { key = "Left", modifier = "Shift" }
 #   jump = { button = "Click mouse wheel", modifier = "Shift" }
-# `ds2-bindings --show` prints a save's controls in this same format.
+# `ds2 bindings --show` prints a save's controls in this same format.
 #
 # This is one particular scheme: the keyboard side matches a Steam Input layout
 # that sends these keys from a gamepad, with Toggle menu on C and V and

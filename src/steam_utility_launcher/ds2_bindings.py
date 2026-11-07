@@ -355,7 +355,7 @@ def _create_plan(
 
 @dataclass(frozen=True, kw_only=True)
 class BindingsRequest:
-    """What `ds2-bindings` was asked to do."""
+    """What `ds2 bindings` was asked to do."""
 
     save: Path | None = None
     config: Path | None = None

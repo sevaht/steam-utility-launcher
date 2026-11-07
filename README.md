@@ -491,13 +491,38 @@ study it but not redistribute or modify it, so it is downloaded from ZEmu's
 releases when you run this and is never bundled here, and none of its code is
 used. ZEmu Launcher — https://zemu.uk
 
-### Dark Souls II controls
+### Dark Souls II
+
+The Dark Souls II: Scholar of the First Sin commands are under `ds2` (or
+`dark-souls-2`, which is the same): `ds2 bindings`, `ds2 controller` and
+`ds2 deadzone`.
+
+#### Dark Souls II analog stick deadzone
+
+The game ignores a stick near either axis, which makes diagonals awkward; the
+other Dark Souls games use a round 36% deadzone. The "Center Deadzone Mod"
+(Nexus Mods, Dark Souls II mod 1200) changes that by rewriting the one function
+that works it out: 202 bytes of the 28 MB `DarkSoulsII.exe`. Nothing of the
+game is bundled here; this knows only those bytes, as the game has them and as
+the mod does, and switches between them in the game's installed executable:
+```bash
+steam-utility-launcher ds2 deadzone          # says which it has
+steam-utility-launcher ds2 deadzone on       # the round deadzone
+steam-utility-launcher ds2 deadzone off      # the game's own
+```
+An executable that has neither (another game version) is never written; the
+file isn't backed up, since Steam's "verify integrity of game files" restores
+it. A game update restores the original deadzone, so run `on` again. Close the
+game first. `--executable` picks another file, and `--dry-run` says what would
+change.
+
+#### Dark Souls II controls
 
 Dark Souls II: Scholar of the First Sin keeps its keyboard and mouse controls
 in its save file, so they can be set without going through the menus. Close the
 game, then run:
 ```bash
-steam-utility-launcher ds2-bindings
+steam-utility-launcher ds2 bindings
 ```
 This finds the game's save (in its Proton prefix on Linux, in
 `%APPDATA%\DarkSoulsII` on Windows), backs it up beside itself
@@ -529,7 +554,7 @@ There doesn't have to be a save yet. To make one, for the Steam account in
 use (or the one `--steam-id` names, by its 17 digit id or the 16 hex digits of
 a save's folder):
 ```bash
-steam-utility-launcher ds2-bindings --create
+steam-utility-launcher ds2 bindings --create
 ```
 It makes the save in the game's Proton prefix, with the controls set and the
 game's terms and conditions marked as accepted (so it doesn't ask; leave that
@@ -544,14 +569,14 @@ one) have to be given by number, as the game stores them; `--show` prints a
 control set to one as a number. The bundled file is one particular scheme, to
 go with a Steam Input layout that sends those keys from a gamepad.
 
-### Dark Souls II controller layout
+#### Dark Souls II controller layout
 
 The controls above are keyboard keys, so playing on a gamepad needs Steam Input
 to send them. This program ships the layout for that (in `resources/`), which
 maps the buttons to the keys of the bundled controls, and can have Steam use it
 for the game, whatever the controller:
 ```bash
-steam-utility-launcher ds2-controller
+steam-utility-launcher ds2 controller
 ```
 Steam keeps a layout, and the choice of which a game uses, for each kind of
 controller, so this puts the layout in place for each: generic (the XInput-style
