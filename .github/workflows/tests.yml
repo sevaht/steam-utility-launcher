@@ -12,9 +12,6 @@ jobs:
   test:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # Linux is the reference. Windows reports until the tests that are about
-    # Proton prefixes, permissions and symlinks are marked, then it can block.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:

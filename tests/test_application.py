@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
@@ -10,6 +11,10 @@ from steam_utility_launcher.commands.utility_commands import (
 )
 from steam_utility_launcher.steam import Steam
 from steam_utility_launcher.utilities import rotk_launcher
+
+_proton_only = pytest.mark.skipif(
+    sys.platform == "win32", reason="The Proton options exist only on Linux"
+)
 
 
 def _launches(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
@@ -36,6 +41,7 @@ def test_no_overlay_is_requested_by_default(
     assert calls[0]["options"].hud is None
 
 
+@_proton_only
 def test_the_overlay_value_is_forwarded_untouched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -46,6 +52,7 @@ def test_the_overlay_value_is_forwarded_untouched(
     assert calls[0]["options"].hud == "fps,gpuload,scale=1.5,opacity=0.8"
 
 
+@_proton_only
 def test_the_default_overlay_is_the_preferred_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -54,6 +61,7 @@ def test_the_default_overlay_is_the_preferred_one(
     assert calls[0]["options"].hud == rotk_launcher.DEFAULT_HUD
 
 
+@_proton_only
 def test_an_overlay_cannot_be_both_given_and_the_default(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -65,6 +73,7 @@ def test_an_overlay_cannot_be_both_given_and_the_default(
 
 
 @pytest.mark.parametrize("value", ["fps, gpuload", "fps;gpuload", ""])
+@_proton_only
 def test_an_overlay_value_dxvk_could_not_read_is_a_usage_error(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -85,6 +94,7 @@ def test_no_frame_rate_limit_by_default(
     assert calls[0]["options"].max_fps is None
 
 
+@_proton_only
 def test_the_frame_rate_limit_is_forwarded_as_a_number(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -94,6 +104,7 @@ def test_the_frame_rate_limit_is_forwarded_as_a_number(
 
 
 @pytest.mark.parametrize("value", ["0", "-5", "fast", "60.5"])
+@_proton_only
 def test_a_frame_rate_limit_that_makes_no_sense_is_a_usage_error(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -115,6 +126,7 @@ def test_vsync_is_not_overridden_by_default(
 
 
 @pytest.mark.parametrize("value", [0, 1, 2, 4])
+@_proton_only
 def test_the_vsync_interval_is_forwarded_as_a_number(
     monkeypatch: pytest.MonkeyPatch, value: int
 ) -> None:
@@ -124,6 +136,7 @@ def test_the_vsync_interval_is_forwarded_as_a_number(
 
 
 @pytest.mark.parametrize("value", ["5", "-1", "on", "0.5"])
+@_proton_only
 def test_a_vsync_interval_dxgi_would_refuse_is_a_usage_error(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -144,6 +157,7 @@ def test_the_steam_overlay_is_not_taken_away_by_default(
     assert calls[0]["options"].no_steam_overlay is False
 
 
+@_proton_only
 def test_taking_the_steam_overlay_away_is_forwarded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -307,7 +308,8 @@ def test_a_fresh_install_is_verified_executable_and_tagged(
 ) -> None:
     world.launcher._install_if_needed(force=False)
     assert world.appimage.read_bytes() == _CONTENT
-    assert world.appimage.stat().st_mode & stat.S_IXUSR
+    if sys.platform != "win32":  # Windows has no executable bit
+        assert world.appimage.stat().st_mode & stat.S_IXUSR
     tag = (
         world.launcher.install_directory / ".github_release_tag"
     ).read_text()
@@ -436,6 +438,10 @@ def launched(
     return _FakeProcess.instances
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="ZEmu's config is under XDG_DATA_HOME, which Windows ignores",
+)
 def test_launch_installs_configures_and_runs_the_appimage(
     world: _World,
     launched: list[_FakeProcess],

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
+
+import pytest
 
 from steam_utility_launcher.keyvalues import Section
 from steam_utility_launcher.wine_prefix import (
@@ -67,6 +70,10 @@ def test_wine_placeholder_files_count_as_builtins(tmp_path: Path) -> None:
     assert is_wine_builtin(placeholder)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Wine drives are symlinks named like `s:`, which Windows can't make",
+)
 def test_a_drive_is_mapped_and_a_wrong_mapping_is_replaced(
     tmp_path: Path,
 ) -> None:
@@ -105,6 +112,9 @@ def test_a_file_is_installed_once_and_then_left_alone(tmp_path: Path) -> None:
     assert target.read_bytes() == b"two"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows has no executable bit"
+)
 def test_a_file_that_is_not_executable_is_fixed_only_when_asked(
     tmp_path: Path,
 ) -> None:

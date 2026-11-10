@@ -335,9 +335,8 @@ def test_the_layouts_for_the_kinds_are_the_same_buttons(steam: Steam) -> None:
     base = ControllerLayout.bundled()
     reference = base.text.count("key_press")
     for kind in CONTROLLER_TYPES:
-        text = (
-            _configs(steam).layout_path(APP, base.for_type(kind)).read_text()
-        )
+        path = _configs(steam).layout_path(APP, base.for_type(kind))
+        text = path.read_text(encoding="utf-8")
         assert text.count("key_press") == reference
         assert f'"controller_type"\t\t"{kind.name}"' in text
 

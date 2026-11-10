@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import stat
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -253,7 +254,7 @@ def test_layouts_are_kept_in_the_accounts_folder(tmp_path: Path) -> None:
         base / "configset_controller_generic.vdf"
     )
     assert configs.autosave_url(APP, "controller_generic") == (
-        f"autosave://{base}/335300/controller_generic.vdf"
+        f"autosave://{base / '335300' / 'controller_generic.vdf'}"
     )
 
 
@@ -330,7 +331,8 @@ def test_writing_backs_up_what_it_replaces_first(tmp_path: Path) -> None:
         "configset_controller_generic.vdf"
     ]
     assert backups[0].read_text() == SELECTIONS
-    assert stat.S_IMODE(selection.stat().st_mode) == 0o640
+    if sys.platform != "win32":  # Windows has no permission bits
+        assert stat.S_IMODE(selection.stat().st_mode) == 0o640
     assert selected_template(selection.read_text(), 570940) is not None
 
 
@@ -482,7 +484,10 @@ def test_a_layout_for_several_kinds_is_planned_for_each(
         assert selected_template(read_text(selection) or "", APP) == (
             f"CLOUD_335300/{layout.name}"
         )
-        url = f"autosave://{configs.directory}/335300/{layout.controller_type}.vdf"
+        url_path = (
+            configs.directory / "335300" / f"{layout.controller_type}.vdf"
+        )
+        url = f"autosave://{url_path}"
         assert f'"url"\t\t"{url}"' in (
             configs.layout_path(APP, layout).read_text()
         )

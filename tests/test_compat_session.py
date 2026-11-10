@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -41,6 +42,10 @@ def _steam(root: Path, *tools: CompatibilityTool) -> Steam:
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Steam separates the tool paths with a colon on Linux",
+)
 def test_the_session_is_read_from_what_steam_sets(tmp_path: Path) -> None:
     session = CompatSession.from_environment(
         {

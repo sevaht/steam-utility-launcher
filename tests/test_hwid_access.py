@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from typing import TYPE_CHECKING
+
+import pytest
 
 from steam_utility_launcher import hwid_access
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import pytest
+_linux_only = pytest.mark.skipif(
+    sys.platform == "win32", reason="Needs root and sudo, which Linux has"
+)
 
 
 def test_file_list_matches_the_root_script() -> None:
@@ -19,7 +24,7 @@ def test_file_list_matches_the_root_script() -> None:
     names = tuple(re.findall(r'"([a-z_]+)"', match.group(1)))
     assert names == hwid_access.DMI_FILES
     assert 'Path("/sys/class/dmi/id")' in script
-    assert str(hwid_access.DMI_DIR) == "/sys/class/dmi/id"
+    assert hwid_access.DMI_DIR.as_posix() == "/sys/class/dmi/id"
 
 
 def test_restricted_files_lists_only_existing_unreadable_ones(
@@ -68,6 +73,7 @@ def test_problem_names_the_files_and_the_fix(
     assert "Refusing to start" in problem
 
 
+@_linux_only
 def test_nothing_is_run_when_already_readable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -87,6 +93,7 @@ def test_nothing_is_run_when_already_readable(
     assert "already usable" in capsys.readouterr().out
 
 
+@_linux_only
 def test_refuses_to_run_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "steam_utility_launcher.hwid_access.os.geteuid", lambda: 0
@@ -94,6 +101,7 @@ def test_refuses_to_run_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
     assert hwid_access.run() == 1
 
 
+@_linux_only
 def test_sudo_runs_a_system_python_isolated_with_the_script_on_stdin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -131,6 +139,7 @@ def test_sudo_runs_a_system_python_isolated_with_the_script_on_stdin(
     assert stdin == hwid_access.root_script_text()
 
 
+@_linux_only
 def test_declining_the_prompt_runs_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -157,7 +166,7 @@ def test_tpm_pattern_and_rule_match_the_root_script() -> None:
     assert (
         'KERNEL=="tpmrm[0-9]*", SUBSYSTEM=="tpmrm", TAG+="uaccess"' in script
     )
-    assert str(hwid_access.DEV_DIR) == "/dev"
+    assert hwid_access.DEV_DIR.as_posix() == "/dev"
 
 
 def test_inaccessible_tpm_devices_lists_only_unusable_ones(
@@ -205,6 +214,7 @@ def test_tpm_problem_names_the_fix_and_stops_the_launch(
     assert "without --tpm" in missing
 
 
+@_linux_only
 def test_run_acts_when_only_the_tpm_is_unusable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

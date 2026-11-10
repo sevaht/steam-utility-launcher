@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, Unpack
@@ -299,7 +300,8 @@ def test_sets_the_controls_and_backs_up_the_save(
     assert _controls(save).mouse == START_MOUSE
     (backup,) = _backups(save)
     assert backup.read_bytes() == original
-    assert save.stat().st_mode & 0o777 == 0o640
+    if sys.platform != "win32":  # Windows has no permission bits
+        assert save.stat().st_mode & 0o777 == 0o640
     assert not list(save.parent.glob("*.sul-new"))
     output = capsys.readouterr().out
     assert "keyboard toggle_menu_left: Shift+Left -> C" in output

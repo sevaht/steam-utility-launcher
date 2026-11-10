@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, override
@@ -239,7 +241,8 @@ def test_tpm_key_blobs_are_kept_in_a_private_host_directory(
     directory = tmp_path / "data" / "tpm"
     assert extra["SUL_TPM_DIR"] == wine_path(directory)
     assert directory.is_dir()
-    assert directory.stat().st_mode & 0o077 == 0  # only the user
+    if sys.platform != "win32":  # Windows has no permission bits
+        assert directory.stat().st_mode & 0o077 == 0  # only the user
 
 
 def test_endorsement_extras_are_off_unless_asked_for(
@@ -975,7 +978,9 @@ def test_a_process_that_would_not_run_in_the_prefix_is_never_started() -> None:
         compatibility_tools=[],
     )
     launch = ShortcutLaunch(steam, _SESSION, _STEAM_COMMAND)
-    with pytest.raises(RuntimeError, match=r"/compat/1/pfx"):
+    with pytest.raises(
+        RuntimeError, match=re.escape(str(_SESSION.wine_prefix.path))
+    ):
         launch.process(["C:\\setup.exe"])
 
 
@@ -1134,6 +1139,10 @@ _SHORTCUT_APP = "3574495053"
 _SHORTCUT_GAME = "15353327787965079552"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows upper-cases environment variable names",
+)
 def test_the_ids_steam_gave_the_program_are_left_as_they_are(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
