@@ -86,6 +86,14 @@ __declspec(dllexport) HRESULT WINAPI DirectInput8Create(
 	return create ? create(instance, version, iid, out, outer) : E_FAIL;
 }
 
+/*
+ * A pointer the loader has to fix up when it moves the DLL, which is what makes
+ * the linker keep a relocation table. Without one, the DLL could only load at
+ * the address it is built for, and if something else held that address the
+ * game would not start (Windows does not move a DLL that cannot be fixed up).
+ */
+volatile const void *const keep_relocations = (const void *)DirectInput8Create;
+
 BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved)
 {
 	(void)module;

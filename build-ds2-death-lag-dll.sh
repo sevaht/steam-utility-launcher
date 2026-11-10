@@ -22,6 +22,6 @@ output="$resources/ds2_death_lag_dinput8.dll"
     -fno-tree-loop-distribute-patterns \
     -Wl,--entry,DllMain -Wl,--gc-sections \
     -Wl,--file-alignment,512 -Wl,--section-alignment,512 \
-    -Wl,--no-insert-timestamp -Wl,--disable-reloc-section \
+    -Wl,--no-insert-timestamp \
     -o "$output" "$resources/ds2_death_lag_dinput8.c" -lkernel32
 echo "Built $output ($(stat -c %s "$output") bytes)"

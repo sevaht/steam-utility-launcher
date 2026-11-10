@@ -536,7 +536,7 @@ steam-utility-launcher ds2 death-lag-fix on      # the fix, in the executable
 steam-utility-launcher ds2 death-lag-fix dll     # the fix, by a dinput8.dll
 steam-utility-launcher ds2 death-lag-fix off     # the game's own
 ```
-`dll` leaves the executable as the game has it, and instead puts a 3 KB
+`dll` leaves the executable as the game has it, and instead puts a 3.5 KB
 `dinput8.dll` in the game's folder (`resources/ds2_death_lag_dinput8.c`,
 prebuilt by `build-ds2-death-lag-dll.sh`). The game loads it for its controller
 input (Wine and Proton load a DLL from the program's own folder before their
