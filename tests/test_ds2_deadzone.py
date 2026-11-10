@@ -121,7 +121,7 @@ def test_both_names_of_the_group_work(
     group: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = _write(tmp_path, ORIGINAL_CODE)
-    arguments = [group, "deadzone", "--executable", str(path)]
+    arguments = [group, "deadzone-fix", "--executable", str(path)]
     assert application.main([*arguments, "status"]) == 0
     assert "axial" in capsys.readouterr().out
     assert application.main([*arguments, "on"]) == 0

@@ -1,0 +1,96 @@
+/*
+ * dinput8.dll for Dark Souls II: Scholar of the First Sin: applies the death
+ * lag fix (see ds2_death_lag.py) to the game's code in memory, instead of in
+ * its executable file.
+ *
+ * The game imports DirectInput8Create from dinput8.dll, so a dinput8.dll in
+ * the game's folder is loaded by it (on Wine, once the prefix says to prefer
+ * a native one). When loaded, it changes the same 45 bytes the file patch
+ * does, but only if they are exactly the game's own, and forwards
+ * DirectInput8Create to the system's dinput8.dll. It does nothing else.
+ *
+ * The two byte strings must equal ORIGINAL_CODE and FIXED_CODE of
+ * ds2_death_lag.py (a test checks it). Built by build-ds2-death-lag-dll.sh,
+ * without a C runtime, to keep it small.
+ */
+#include <windows.h>
+
+/* Virtual address 0x140b5e82c, relative to the image base 0x140000000. */
+#define PATCH_RVA 0xB5E82CUL
+#define PATCH_SIZE 45
+
+static const unsigned char ORIGINAL_CODE[PATCH_SIZE] = {
+	0x44, 0x38, 0x7b, 0x7c, 0x0f, 0x85, 0xb8, 0x00, 0x00,
+	0x00, 0x40, 0x84, 0xff, 0x0f, 0x84, 0xaf, 0x00, 0x00,
+	0x00, 0x48, 0x8b, 0x43, 0x68, 0xc6, 0x43, 0x7c, 0x01,
+	0x48, 0x8b, 0x78, 0x08, 0x44, 0x38, 0x7b, 0x74, 0x0f,
+	0x84, 0x99, 0x00, 0x00, 0x00, 0x44, 0x88, 0x7b, 0x7c
+};
+static const unsigned char FIXED_CODE[PATCH_SIZE] = {
+	0x40, 0x3a, 0x7b, 0x7c, 0x0f, 0x86, 0xb8, 0x00, 0x00,
+	0x00, 0x48, 0x8b, 0x43, 0x68, 0x44, 0x38, 0xb8, 0x90,
+	0x01, 0x00, 0x00, 0x0f, 0x85, 0xa7, 0x00, 0x00, 0x00,
+	0x48, 0x8b, 0x78, 0x08, 0x44, 0x38, 0x7b, 0x74, 0x0f,
+	0x94, 0x43, 0x7c, 0x0f, 0x84, 0x95, 0x00, 0x00, 0x00
+};
+
+static void apply_patch(void)
+{
+	unsigned char *base = (unsigned char *)GetModuleHandleA(NULL);
+	IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
+	IMAGE_NT_HEADERS64 *nt;
+	unsigned char *at;
+	DWORD old;
+	int i;
+
+	if (!base || dos->e_magic != IMAGE_DOS_SIGNATURE)
+		return;
+	nt = (IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
+	if (nt->Signature != IMAGE_NT_SIGNATURE
+	    || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC
+	    || nt->OptionalHeader.SizeOfImage < PATCH_RVA + PATCH_SIZE)
+		return;
+	at = base + PATCH_RVA;
+	for (i = 0; i < PATCH_SIZE; i++)
+		if (at[i] != ORIGINAL_CODE[i])
+			return; /* another version, or already changed */
+	if (!VirtualProtect(at, PATCH_SIZE, PAGE_EXECUTE_READWRITE, &old))
+		return;
+	for (i = 0; i < PATCH_SIZE; i++)
+		at[i] = FIXED_CODE[i];
+	VirtualProtect(at, PATCH_SIZE, old, &old);
+	FlushInstructionCache(GetCurrentProcess(), at, PATCH_SIZE);
+}
+
+typedef HRESULT (WINAPI *create_fn)(HINSTANCE, DWORD, REFIID, LPVOID *,
+				    LPUNKNOWN);
+
+__declspec(dllexport) HRESULT WINAPI DirectInput8Create(
+	HINSTANCE instance, DWORD version, REFIID iid, LPVOID *out,
+	LPUNKNOWN outer)
+{
+	char path[MAX_PATH + 16];
+	static const char name[] = "\\dinput8.dll";
+	UINT n = GetSystemDirectoryA(path, MAX_PATH);
+	HMODULE real;
+	create_fn create;
+	UINT i;
+
+	if (!n || n > MAX_PATH)
+		return E_FAIL;
+	for (i = 0; i < sizeof(name); i++)
+		path[n + i] = name[i];
+	real = LoadLibraryA(path);
+	create = real ? (create_fn)(void *)GetProcAddress(real, "DirectInput8Create")
+		      : NULL;
+	return create ? create(instance, version, iid, out, outer) : E_FAIL;
+}
+
+BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved)
+{
+	(void)module;
+	(void)reserved;
+	if (reason == DLL_PROCESS_ATTACH)
+		apply_patch();
+	return TRUE;
+}

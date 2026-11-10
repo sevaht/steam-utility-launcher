@@ -216,7 +216,7 @@ that carry no hardware fingerprint, and the app collects it by running
 PowerShell/WMI queries, which Wine's stub can't answer. This tool therefore
 replaces the prefix's `powershell.exe` (both `system32` and `syswow64`, each
 with its own architecture's build) with a small native Windows program
-(`resources/wine_powershell_hwid.c`, prebuilt by `build-powershell-hwid`).
+(`resources/wine_powershell_hwid.c`, prebuilt by `build-powershell-hwid.sh`).
 It is left in place permanently: every `rotk-launcher` run checks that it is
 present and current and reinstalls it if it's missing or differs (for
 example after a prefix reset or a new build), and never takes it back out.
@@ -494,8 +494,8 @@ used. ZEmu Launcher — https://zemu.uk
 ### Dark Souls II
 
 The Dark Souls II: Scholar of the First Sin commands are under `ds2` (or
-`dark-souls-2`, which is the same): `ds2 bindings`, `ds2 controller` and
-`ds2 deadzone`.
+`dark-souls-2`, which is the same): `ds2 bindings`, `ds2 controller`,
+`ds2 deadzone-fix` and `ds2 death-lag-fix`.
 
 #### Dark Souls II analog stick deadzone
 
@@ -506,15 +506,54 @@ that works it out: 202 bytes of the 28 MB `DarkSoulsII.exe`. Nothing of the
 game is bundled here; this knows only those bytes, as the game has them and as
 the mod does, and switches between them in the game's installed executable:
 ```bash
-steam-utility-launcher ds2 deadzone          # says which it has
-steam-utility-launcher ds2 deadzone on       # the round deadzone
-steam-utility-launcher ds2 deadzone off      # the game's own
+steam-utility-launcher ds2 deadzone-fix          # says which it has
+steam-utility-launcher ds2 deadzone-fix on       # the round deadzone
+steam-utility-launcher ds2 deadzone-fix off      # the game's own
 ```
 An executable that has neither (another game version) is never written; the
 file isn't backed up, since Steam's "verify integrity of game files" restores
 it. A game update restores the original deadzone, so run `on` again. Close the
 game first. `--executable` picks another file, and `--dry-run` says what would
 change.
+
+#### Dark Souls II slowing down with every death
+
+On an account that has every achievement, Dark Souls II: Scholar of the First
+Sin gets a little slower with every death, until the game is restarted (the
+frame rate starts to fall after about ten). Whenever Steam tells the game its
+stats, the game goes through all of its achievements and, if all but the first
+("The Dark Soul": earn them all) are unlocked, awards that one again and tells
+Steam to store it, without checking that it is already unlocked. Steam answers
+by saying the stats were stored, and the game answers that by asking for the
+stats again: about 120 Steam calls every 300 ms, for as long as the game runs.
+Every death awards an achievement too, and that store starts one more copy of
+the loop, which is never removed. This changes 45 bytes of the 28 MB
+`DarkSoulsII.exe`, in the function that handles those stats, so that it doesn't
+award an achievement it already has; the loop then ends at its first pass:
+```bash
+steam-utility-launcher ds2 death-lag-fix         # says which it has
+steam-utility-launcher ds2 death-lag-fix on      # the fix, in the executable
+steam-utility-launcher ds2 death-lag-fix dll     # the fix, by a dinput8.dll
+steam-utility-launcher ds2 death-lag-fix off     # the game's own
+```
+`dll` leaves the executable as the game has it, and instead puts a 3 KB
+`dinput8.dll` in the game's folder (`resources/ds2_death_lag_dinput8.c`,
+prebuilt by `build-ds2-death-lag-dll.sh`). The game loads it for its controller
+input (Wine and Proton load a DLL from the program's own folder before their
+own, so no setting is needed); it changes the same 45 bytes in memory, only if
+they are the game's own, and passes everything else to the system's
+`dinput8.dll`. `on`, `off` and `dll` replace one another, removing what the
+others put there; another `dinput8.dll` already in the folder is never
+replaced or removed.
+Nothing of the game is bundled; this knows only those bytes, as the game has
+them and as they are fixed. Awarding "The Dark Soul" for the first time still
+works, and an account that is missing an achievement is not affected, since the
+game never gets as far as awarding it. An executable that has neither version
+(another game version) is never written; the file isn't backed up, since
+Steam's "verify integrity of game files" restores it. A game update restores
+the original, so run `on` again. Close the game first. `--executable` picks
+another file, and `--dry-run` says what would change. It can be used together
+with `ds2 deadzone-fix`; they change different places.
 
 #### Dark Souls II controls
 

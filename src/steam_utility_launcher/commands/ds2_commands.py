@@ -1,12 +1,18 @@
 """The Dark Souls II commands, under `ds2` (or `dark-souls-2`): its controls,
-its controller layout, and its analog stick deadzone."""
+its controller layout, its analog stick deadzone, and the slowdown it gets with
+every death."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, override
 
-from steam_utility_launcher import ds2_bindings, ds2_controller, ds2_deadzone
+from steam_utility_launcher import (
+    ds2_bindings,
+    ds2_controller,
+    ds2_deadzone,
+    ds2_death_lag,
+)
 from steam_utility_launcher.commands.base import (
     Command,
     CommandGroup,
@@ -216,8 +222,8 @@ class Ds2ControllerCommand(Command):
         return 0
 
 
-class Ds2DeadzoneCommand(Command):
-    name = "deadzone"
+class Ds2DeadzoneFixCommand(Command):
+    name = "deadzone-fix"
     help = (
         "Show, or switch, the analog stick deadzone of Dark Souls II:"
         " Scholar of the First Sin between its own and the round one of the"
@@ -283,15 +289,88 @@ class Ds2DeadzoneCommand(Command):
         return 0
 
 
+class Ds2DeathLagFixCommand(Command):
+    name = "death-lag-fix"
+    help = (
+        "Show, or switch, the fix for Dark Souls II: Scholar of the First Sin"
+        " getting slower with every death: an endless Steam achievements loop"
+        " on an account that has every achievement, which each death makes"
+        " one copy bigger. The fix stops the game awarding an achievement it"
+        " already has: 45 bytes, changed in its executable (on) or, leaving"
+        " the executable alone, in memory by a tiny dinput8.dll (dll)."
+    )
+
+    @override
+    def add_arguments(
+        self, parser: argparse.ArgumentParser, host: Host
+    ) -> None:
+        parser.add_argument(
+            "state",
+            nargs="?",
+            choices=["status", "on", "off", "dll"],
+            default="status",
+            help=(
+                "on: the fixed handling, in the executable; dll: the fixed"
+                " handling by a dinput8.dll in the game's folder, leaving the"
+                " executable alone; off: the game's own; status (the"
+                " default): say which it has."
+            ),
+        )
+        parser.add_argument(
+            "--executable",
+            help=(
+                "The DarkSoulsII.exe to use; defaults to the one in the"
+                " game's Steam install."
+            ),
+        )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Say what would change, without changing anything.",
+        )
+
+    @override
+    def run(self, args: argparse.Namespace, context: Context) -> int:
+        if args.executable:
+            executable = Path(args.executable)
+        else:
+            executable = (
+                context.steam.game_install_path(game_id=DS2_SOTFS_ID)
+                / "Game"
+                / ds2_deadzone.GAME_EXECUTABLE
+            )
+        want = {
+            "status": None,
+            "on": ds2_death_lag.DeathLag.FIXED,
+            "off": ds2_death_lag.DeathLag.ORIGINAL,
+            "dll": ds2_death_lag.DeathLag.DLL,
+        }[args.state]
+        request = ds2_death_lag.DeathLagRequest(
+            executable=executable,
+            want=want,
+            dry_run=args.dry_run,
+            # Not looked for with --executable: the path given is likely in
+            # this very command line. A Windows game that runs has its file
+            # locked, so the write would fail on its own.
+            game_running=(
+                not args.executable
+                and ds2_bindings.game_is_running(context.host)
+            ),
+        )
+        ds2_death_lag.DeathLagPatcher(request).run()
+        return 0
+
+
 class Ds2Command(CommandGroup):
     name = "ds2"
     aliases = ("dark-souls-2",)
     help = (
         "Dark Souls II: Scholar of the First Sin: bindings, controller,"
-        " deadzone."
+        " deadzone-fix, death-lag-fix."
     )
     subcommands = (
         Ds2BindingsCommand(),
         Ds2ControllerCommand(),
-        Ds2DeadzoneCommand(),
+        Ds2DeadzoneFixCommand(),
+        Ds2DeathLagFixCommand(),
     )
