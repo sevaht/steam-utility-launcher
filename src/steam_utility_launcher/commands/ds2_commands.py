@@ -20,8 +20,10 @@ from steam_utility_launcher.commands.base import (
     UsageError,
     argument_type,
 )
+from steam_utility_launcher.commands.fix_commands import FixCommand
 from steam_utility_launcher.errors import UserError
 from steam_utility_launcher.games import DS2_SOTFS_ID
+from steam_utility_launcher.patching import PatchMethod
 from steam_utility_launcher.programs import ProgramRunner
 from steam_utility_launcher.steam_input import (
     CONTROLLER_TYPES,
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
     import argparse
 
     from steam_utility_launcher.host import Host
+    from steam_utility_launcher.patching import Fix, FixTarget
 
 
 class Ds2BindingsCommand(Command):
@@ -222,143 +225,62 @@ class Ds2ControllerCommand(Command):
         return 0
 
 
-class Ds2DeadzoneFixCommand(Command):
+class _Ds2FixCommand(FixCommand):
+    """A fix of the game's executable, which is in its `Game` folder."""
+
+    game_name = "Dark Souls II"
+    game_id = DS2_SOTFS_ID
+    executable_path = f"Game/{ds2_deadzone.GAME_EXECUTABLE}"
+
+    @override
+    def is_game_running(self, host: Host) -> bool:
+        return ds2_bindings.game_is_running(host)
+
+
+class Ds2DeadzoneFixCommand(_Ds2FixCommand):
     name = "deadzone-fix"
     help = (
-        "Show, or switch, the analog stick deadzone of Dark Souls II:"
-        " Scholar of the First Sin between its own and the round one of the"
-        " other Dark Souls games (the Center Deadzone Mod's change, made"
-        " here without bundling the game)."
+        "Dark Souls II: Scholar of the First Sin's analog stick deadzone: the"
+        " game's own, or the round one of the other Dark Souls games (the"
+        " Center Deadzone Mod's change, made here without bundling the game)."
+        " patch makes it round."
     )
 
     @override
-    def add_arguments(
-        self, parser: argparse.ArgumentParser, host: Host
-    ) -> None:
-        parser.add_argument(
-            "state",
-            nargs="?",
-            choices=["status", "on", "off"],
-            default="status",
-            help=(
-                "on: the centered deadzone; off: the game's own; status"
-                " (the default): say which it has."
-            ),
-        )
-        parser.add_argument(
-            "--executable",
-            help=(
-                "The DarkSoulsII.exe to use; defaults to the one in the"
-                " game's Steam install."
-            ),
-        )
-        parser.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="Say what would change, without changing anything.",
-        )
-
-    @override
-    def run(self, args: argparse.Namespace, context: Context) -> int:
-        if args.executable:
-            executable = Path(args.executable)
-        else:
-            executable = (
-                context.steam.game_install_path(game_id=DS2_SOTFS_ID)
-                / "Game"
-                / ds2_deadzone.GAME_EXECUTABLE
-            )
-        want = {
-            "status": None,
-            "on": ds2_deadzone.Deadzone.CENTERED,
-            "off": ds2_deadzone.Deadzone.ORIGINAL,
-        }[args.state]
-        request = ds2_deadzone.DeadzoneRequest(
-            executable=executable,
-            want=want,
-            dry_run=args.dry_run,
-            # Not looked for with --executable: the path given is likely in
-            # this very command line. A Windows game that runs has its file
-            # locked, so the write would fail on its own.
-            game_running=(
-                not args.executable
-                and ds2_bindings.game_is_running(context.host)
-            ),
-        )
-        ds2_deadzone.DeadzonePatcher(request).run()
-        return 0
+    def build_fix(self, args: argparse.Namespace, target: FixTarget) -> Fix:
+        return ds2_deadzone.deadzone_fix(target)
 
 
-class Ds2DeathLagFixCommand(Command):
+class Ds2DeathLagFixCommand(_Ds2FixCommand):
     name = "death-lag-fix"
     help = (
-        "Show, or switch, the fix for Dark Souls II: Scholar of the First Sin"
-        " getting slower with every death: an endless Steam achievements loop"
-        " on an account that has every achievement, which each death makes"
-        " one copy bigger. The fix stops the game awarding an achievement it"
-        " already has: 45 bytes, changed in its executable (on) or, leaving"
-        " the executable alone, in memory by a tiny dinput8.dll (dll)."
+        "Dark Souls II: Scholar of the First Sin getting slower with every"
+        " death: an endless Steam achievements loop on an account that has"
+        " every achievement, which each death makes one copy bigger. The fix"
+        " stops the game awarding an achievement it already has: 45 bytes,"
+        " changed in its executable or, leaving the executable alone, in"
+        " memory by a tiny dinput8.dll (--method dll)."
     )
 
     @override
-    def add_arguments(
-        self, parser: argparse.ArgumentParser, host: Host
-    ) -> None:
+    def add_fix_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
-            "state",
-            nargs="?",
-            choices=["status", "on", "off", "dll"],
-            default="status",
+            "--method",
+            type=PatchMethod,
+            choices=list(PatchMethod),
+            default=PatchMethod.EXECUTABLE,
+            metavar="{executable,dll}",
             help=(
-                "on: the fixed handling, in the executable; dll: the fixed"
-                " handling by a dinput8.dll in the game's folder, leaving the"
-                " executable alone; off: the game's own; status (the"
-                " default): say which it has."
+                "With patch: where the fix is made. executable (the"
+                " default): in the executable; dll: by a dinput8.dll in the"
+                " game's folder, which leaves the executable as the game"
+                " has it."
             ),
-        )
-        parser.add_argument(
-            "--executable",
-            help=(
-                "The DarkSoulsII.exe to use; defaults to the one in the"
-                " game's Steam install."
-            ),
-        )
-        parser.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="Say what would change, without changing anything.",
         )
 
     @override
-    def run(self, args: argparse.Namespace, context: Context) -> int:
-        if args.executable:
-            executable = Path(args.executable)
-        else:
-            executable = (
-                context.steam.game_install_path(game_id=DS2_SOTFS_ID)
-                / "Game"
-                / ds2_deadzone.GAME_EXECUTABLE
-            )
-        want = {
-            "status": None,
-            "on": ds2_death_lag.DeathLag.FIXED,
-            "off": ds2_death_lag.DeathLag.ORIGINAL,
-            "dll": ds2_death_lag.DeathLag.DLL,
-        }[args.state]
-        request = ds2_death_lag.DeathLagRequest(
-            executable=executable,
-            want=want,
-            dry_run=args.dry_run,
-            # Not looked for with --executable: the path given is likely in
-            # this very command line. A Windows game that runs has its file
-            # locked, so the write would fail on its own.
-            game_running=(
-                not args.executable
-                and ds2_bindings.game_is_running(context.host)
-            ),
-        )
-        ds2_death_lag.DeathLagPatcher(request).run()
-        return 0
+    def build_fix(self, args: argparse.Namespace, target: FixTarget) -> Fix:
+        return ds2_death_lag.DeathLagFix(target=target, method=args.method)
 
 
 class Ds2Command(CommandGroup):

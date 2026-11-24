@@ -491,6 +491,65 @@ study it but not redistribute or modify it, so it is downloaded from ZEmu's
 releases when you run this and is never bundled here, and none of its code is
 used. ZEmu Launcher — https://zemu.uk
 
+### Game fixes (`patch`, `restore`, `status`)
+
+A few commands fix a game by changing a few bytes of its executable. Nothing of
+the game is bundled; each one knows only the bytes it changes, as the game has
+them and as they are fixed. They are all used the same way:
+```bash
+steam-utility-launcher <game> <fix> [status|patch|restore] [--dry-run] [--json]
+                                    [--executable FILE]
+```
+`status` (the default) changes nothing, `patch` makes the fix, `restore` puts
+the game's own bytes back. They find the executable in the game's Steam
+install; `--executable` picks another file. `--dry-run` says what would be
+without writing anything.
+
+Standard output is for scripts: one word, the state of the fix after the
+command (or, with `--dry-run`, as it would be):
+
+| Word           | The executable                                              |
+|----------------|-------------------------------------------------------------|
+| `original`     | is as the game has it                                       |
+| `patched`      | has the fix                                                 |
+| `partial`      | has some of the fix's changes (`patch` finishes it)         |
+| `unrecognized` | is another version of the game, and is never written        |
+
+`--json` answers with one line of JSON instead, with the same state and the
+rest: `fix`, `path`, `method` (where the fix is made, for fixes that can be
+made in more than one place), `changed` (whether files were, or with
+`--dry-run` would be, written) and `dry_run`. The exit status is 0 when it
+answered and 1 when it couldn't (the game is running, the version isn't
+known, a file couldn't be read or written), with the reason on standard
+error and nothing on standard output. What is said for a person is logged:
+`-v` shows it. For example:
+```bash
+if [[ "$(steam-utility-launcher mina wayland-fix)" == original ]]; then
+    steam-utility-launcher mina wayland-fix patch
+fi
+```
+The executable is not backed up: the bytes it had are known, so `restore`
+writes them back, and Steam's "verify integrity of game files" restores the
+whole file anyway. A game update does too, so run `patch` again then. Close the
+game first.
+
+#### Mina the Hollower on Wayland
+
+`mina wayland-fix` (or `mina-the-hollower wayland-fix`). Under X11 the game
+runs as it is; on native Wayland with NVIDIA's driver it crashes, because of
+two bugs in the game itself. It describes its Wayland surface to Vulkan with
+the structure type of an X11 one, which a driver that doesn't check it ignores, and NVIDIA's driver (and
+Steam's overlay) don't. And each frame it takes the window's size from the
+swapchain, which the render thread stores only after it has made its first one;
+until then it is "unset" (`0xFFFFFFFF`), which the game turns into a render
+target that the driver crashes making. Which thread is first is a matter of
+timing, which X11 evidently wins. `patch` changes the structure's type, and
+makes the game read the window's own size, which is set before any swapchain.
+It is three edits of a few bytes in the Linux `MinaTheHollower` executable.
+```bash
+steam-utility-launcher mina wayland-fix patch
+```
+
 ### Dark Souls II
 
 The Dark Souls II: Scholar of the First Sin commands are under `ds2` (or
@@ -507,14 +566,10 @@ game is bundled here; this knows only those bytes, as the game has them and as
 the mod does, and switches between them in the game's installed executable:
 ```bash
 steam-utility-launcher ds2 deadzone-fix          # says which it has
-steam-utility-launcher ds2 deadzone-fix on       # the round deadzone
-steam-utility-launcher ds2 deadzone-fix off      # the game's own
+steam-utility-launcher ds2 deadzone-fix patch    # the round deadzone
+steam-utility-launcher ds2 deadzone-fix restore  # the game's own
 ```
-An executable that has neither (another game version) is never written; the
-file isn't backed up, since Steam's "verify integrity of game files" restores
-it. A game update restores the original deadzone, so run `on` again. Close the
-game first. `--executable` picks another file, and `--dry-run` says what would
-change.
+It is used as every game fix is (see above).
 
 #### Dark Souls II slowing down with every death
 
@@ -531,29 +586,26 @@ the loop, which is never removed. This changes 45 bytes of the 28 MB
 `DarkSoulsII.exe`, in the function that handles those stats, so that it doesn't
 award an achievement it already has; the loop then ends at its first pass:
 ```bash
-steam-utility-launcher ds2 death-lag-fix         # says which it has
-steam-utility-launcher ds2 death-lag-fix on      # the fix, in the executable
-steam-utility-launcher ds2 death-lag-fix dll     # the fix, by a dinput8.dll
-steam-utility-launcher ds2 death-lag-fix off     # the game's own
+steam-utility-launcher ds2 death-lag-fix                 # says which it has
+steam-utility-launcher ds2 death-lag-fix patch           # in the executable
+steam-utility-launcher ds2 death-lag-fix patch --method dll  # by a dinput8.dll
+steam-utility-launcher ds2 death-lag-fix restore         # the game's own
 ```
-`dll` leaves the executable as the game has it, and instead puts a 3.5 KB
+`--method dll` leaves the executable as the game has it, and instead puts a 3.5 KB
 `dinput8.dll` in the game's folder (`resources/ds2_death_lag_dinput8.c`,
 prebuilt by `build-ds2-death-lag-dll.sh`). The game loads it for its controller
 input (Wine and Proton load a DLL from the program's own folder before their
 own, so no setting is needed); it changes the same 45 bytes in memory, only if
 they are the game's own, and passes everything else to the system's
-`dinput8.dll`. `on`, `off` and `dll` replace one another, removing what the
-others put there; another `dinput8.dll` already in the folder is never
+`dinput8.dll`. `patch` by either method and `restore` replace one another, removing
+what the others put there; `--json` says which method has made the fix; another `dinput8.dll` already in the folder is never
 replaced or removed.
 Nothing of the game is bundled; this knows only those bytes, as the game has
 them and as they are fixed. Awarding "The Dark Soul" for the first time still
 works, and an account that is missing an achievement is not affected, since the
-game never gets as far as awarding it. An executable that has neither version
-(another game version) is never written; the file isn't backed up, since
-Steam's "verify integrity of game files" restores it. A game update restores
-the original, so run `on` again. Close the game first. `--executable` picks
-another file, and `--dry-run` says what would change. It can be used together
-with `ds2 deadzone-fix`; they change different places.
+game never gets as far as awarding it. It is used as every game fix is (see
+above), and can be used together with `ds2 deadzone-fix`; they change different
+places.
 
 #### Dark Souls II controls
 

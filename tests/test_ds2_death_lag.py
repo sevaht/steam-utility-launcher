@@ -2,28 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from importlib import resources
 from typing import TYPE_CHECKING
 
 import pytest
 
-from steam_utility_launcher import (
-    application,
-    ds2_bindings,
-    ds2_deadzone,
-    ds2_death_lag,
-)
+from steam_utility_launcher import application, ds2_deadzone, ds2_death_lag
 from steam_utility_launcher.ds2_death_lag import (
     DLL_NAME,
     FIXED_CODE,
     ORIGINAL_CODE,
+    PATCH,
     PATCH_OFFSET,
-    DeathLag,
-    DeathLagPatcher,
-    DeathLagRequest,
 )
-from steam_utility_launcher.errors import UserError
+from steam_utility_launcher.patching import PatchState
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -59,11 +53,6 @@ def _restore_logging() -> Iterator[None]:
     root.setLevel(level)
 
 
-@pytest.fixture(autouse=True)
-def _game_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ds2_bindings, "game_is_running", lambda _host: False)
-
-
 def _jump_targets(code: bytes, jumps: tuple[int, ...]) -> list[int]:
     targets = []
     for at in jumps:
@@ -84,79 +73,87 @@ def test_every_branch_of_both_versions_ends_the_same_handler() -> None:
     assert _jump_targets(FIXED_CODE, FIXED_JUMPS) == [SKIP_ADDRESS] * 3
 
 
-def test_death_lag_of_recognizes_each_and_nothing_else() -> None:
-    assert ds2_death_lag.death_lag_of(_executable(ORIGINAL_CODE)) is (
-        DeathLag.ORIGINAL
+def _main(
+    tmp_path: Path, *words: str, capsys: pytest.CaptureFixture[str]
+) -> tuple[int, str]:
+    """Runs the command on the stand-in executable; its exit status and
+    standard output."""
+    capsys.readouterr()
+    status = application.main(
+        [
+            "ds2",
+            "death-lag-fix",
+            "--executable",
+            str(tmp_path / "DarkSoulsII.exe"),
+            *words,
+        ]
     )
-    assert ds2_death_lag.death_lag_of(_executable(FIXED_CODE)) is (
-        DeathLag.FIXED
-    )
-    assert ds2_death_lag.death_lag_of(_executable(b"\0" * 45)) is (
-        DeathLag.UNKNOWN
-    )
-    assert ds2_death_lag.death_lag_of(b"short") is DeathLag.UNKNOWN
+    return status, capsys.readouterr().out
 
 
-def test_on_and_off_switch_only_the_code(tmp_path: Path) -> None:
-    path = _write(tmp_path, ORIGINAL_CODE)
-    DeathLagPatcher(DeathLagRequest(path, DeathLag.FIXED)).run()
-    assert path.read_bytes() == _executable(FIXED_CODE)
-    DeathLagPatcher(DeathLagRequest(path, DeathLag.ORIGINAL)).run()
-    assert path.read_bytes() == _executable(ORIGINAL_CODE)
-    assert [p.name for p in tmp_path.iterdir()] == ["DarkSoulsII.exe"]
-
-
-def test_status_and_dry_run_change_nothing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    path = _write(tmp_path, ORIGINAL_CODE)
-    DeathLagPatcher(DeathLagRequest(path)).run()
-    DeathLagPatcher(DeathLagRequest(path, DeathLag.FIXED, dry_run=True)).run()
-    assert path.read_bytes() == _executable(ORIGINAL_CODE)
-    assert "Would switch" in capsys.readouterr().out
-
-
-def test_it_is_already_so_changes_nothing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    path = _write(tmp_path, FIXED_CODE)
-    DeathLagPatcher(DeathLagRequest(path, DeathLag.FIXED)).run()
-    assert "Already so" in capsys.readouterr().out
-
-
-def test_an_unknown_executable_is_never_written(tmp_path: Path) -> None:
-    path = _write(tmp_path, b"\0" * 45)
-    with pytest.raises(UserError, match="not a game version"):
-        DeathLagPatcher(DeathLagRequest(path, DeathLag.FIXED)).run()
-    assert path.read_bytes() == _executable(b"\0" * 45)
-    DeathLagPatcher(DeathLagRequest(path)).run()  # just asking is fine
-
-
-def test_a_running_game_is_not_touched(tmp_path: Path) -> None:
-    path = _write(tmp_path, ORIGINAL_CODE)
-    request = DeathLagRequest(path, DeathLag.FIXED, game_running=True)
-    with pytest.raises(UserError, match="Close Dark Souls II"):
-        DeathLagPatcher(request).run()
-    assert path.read_bytes() == _executable(ORIGINAL_CODE)
-
-
-def test_a_missing_file_is_a_user_error(tmp_path: Path) -> None:
-    with pytest.raises(UserError, match="Could not read"):
-        DeathLagPatcher(DeathLagRequest(tmp_path / "nope.exe")).run()
+def test_the_patch_recognizes_each_version_and_nothing_else() -> None:
+    assert PATCH.state_of(_executable(ORIGINAL_CODE)) is PatchState.ORIGINAL
+    assert PATCH.state_of(_executable(FIXED_CODE)) is PatchState.PATCHED
+    assert PATCH.state_of(_executable(b"\0" * 45)) is PatchState.UNRECOGNIZED
+    assert PATCH.state_of(b"short") is PatchState.UNRECOGNIZED
 
 
 @pytest.mark.parametrize("group", ["ds2", "dark-souls-2"])
-def test_both_names_of_the_group_work(
+def test_status_patch_and_restore_through_either_name(
     group: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = _write(tmp_path, ORIGINAL_CODE)
     arguments = [group, "death-lag-fix", "--executable", str(path)]
-    assert application.main([*arguments, "status"]) == 0
-    assert "game's own achievement handling" in capsys.readouterr().out
-    assert application.main([*arguments, "on"]) == 0
+    assert application.main(arguments) == 0  # status is the default
+    assert capsys.readouterr().out == "original\n"
+    assert application.main([*arguments, "patch"]) == 0
+    assert capsys.readouterr().out == "patched\n"
     assert path.read_bytes() == _executable(FIXED_CODE)
-    assert application.main([*arguments, "off"]) == 0
+    assert application.main([*arguments, "restore"]) == 0
+    assert capsys.readouterr().out == "original\n"
     assert path.read_bytes() == _executable(ORIGINAL_CODE)
+    assert [entry.name for entry in tmp_path.iterdir()] == [path.name]
+
+
+def test_json_says_where_the_fix_is_made(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write(tmp_path, ORIGINAL_CODE)
+    status, out = _main(tmp_path, "patch", "--json", capsys=capsys)
+    assert status == 0
+    assert json.loads(out) == {
+        "fix": "death-lag-fix",
+        "path": str(path),
+        "state": "patched",
+        "method": "executable",
+        "changed": True,
+        "dry_run": False,
+    }
+    status, out = _main(tmp_path, "--json", capsys=capsys)
+    assert json.loads(out)["method"] == "executable"
+    status, out = _main(tmp_path, "restore", "--json", capsys=capsys)
+    assert json.loads(out)["method"] is None
+
+
+def test_a_dry_run_changes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write(tmp_path, ORIGINAL_CODE)
+    assert _main(tmp_path, "patch", "--dry-run", capsys=capsys) == (
+        0,
+        "patched\n",
+    )
+    assert path.read_bytes() == _executable(ORIGINAL_CODE)
+
+
+def test_an_unknown_executable_is_refused_and_untouched(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write(tmp_path, b"\0" * 45)
+    for action in ("patch", "restore"):
+        assert _main(tmp_path, action, capsys=capsys) == (1, "")
+    assert path.read_bytes() == _executable(b"\0" * 45)
+    assert _main(tmp_path, capsys=capsys) == (0, "unrecognized\n")
 
 
 def test_it_and_the_deadzone_patch_leave_each_other_alone(
@@ -179,13 +176,17 @@ def test_it_and_the_deadzone_patch_leave_each_other_alone(
     path.write_bytes(both(ds2_deadzone.ORIGINAL_CODE, ORIGINAL_CODE))
     arguments = ["ds2", "--executable", str(path)]
     assert (
-        application.main(["ds2", "death-lag-fix", *arguments[1:], "on"]) == 0
+        application.main(["ds2", "death-lag-fix", *arguments[1:], "patch"])
+        == 0
     )
     assert path.read_bytes() == both(ds2_deadzone.ORIGINAL_CODE, FIXED_CODE)
-    assert application.main(["ds2", "deadzone-fix", *arguments[1:], "on"]) == 0
+    assert (
+        application.main(["ds2", "deadzone-fix", *arguments[1:], "patch"]) == 0
+    )
     assert path.read_bytes() == both(ds2_deadzone.CENTERED_CODE, FIXED_CODE)
     assert (
-        application.main(["ds2", "death-lag-fix", *arguments[1:], "off"]) == 0
+        application.main(["ds2", "death-lag-fix", *arguments[1:], "restore"])
+        == 0
     )
     assert path.read_bytes() == both(ds2_deadzone.CENTERED_CODE, ORIGINAL_CODE)
 
@@ -222,70 +223,82 @@ def test_dll_installs_beside_the_executable(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = _write(tmp_path, ORIGINAL_CODE)
-    DeathLagPatcher(DeathLagRequest(path, DeathLag.DLL)).run()
+    assert _main(tmp_path, "patch", "--method", "dll", capsys=capsys) == (
+        0,
+        "patched\n",
+    )
     assert (tmp_path / DLL_NAME).read_bytes() == ds2_death_lag.bundled_dll()
     assert path.read_bytes() == _executable(ORIGINAL_CODE)  # file untouched
-    DeathLagPatcher(DeathLagRequest(path, None)).run()
-    assert "dinput8.dll in the game's folder" in capsys.readouterr().out
+    status, out = _main(tmp_path, "--json", capsys=capsys)
+    assert (status, json.loads(out)["state"], json.loads(out)["method"]) == (
+        0,
+        "patched",
+        "dll",
+    )
 
 
 def test_dll_after_the_file_patch_restores_the_file_first(
-    tmp_path: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = _write(tmp_path, FIXED_CODE)
-    DeathLagPatcher(DeathLagRequest(path, DeathLag.DLL)).run()
+    assert _main(tmp_path, "patch", "--method", "dll", capsys=capsys)[0] == 0
     assert path.read_bytes() == _executable(ORIGINAL_CODE)
     assert (tmp_path / DLL_NAME).exists()
 
 
-@pytest.mark.parametrize(
-    ("want", "code"),
-    [(DeathLag.FIXED, FIXED_CODE), (DeathLag.ORIGINAL, ORIGINAL_CODE)],
-)
-def test_on_and_off_remove_the_dll(
-    want: DeathLag, code: bytes, tmp_path: Path
+def test_the_file_patch_and_restore_remove_the_dll(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = _write(tmp_path, ORIGINAL_CODE)
-    DeathLagPatcher(DeathLagRequest(path, DeathLag.DLL)).run()
-    DeathLagPatcher(DeathLagRequest(path, want)).run()
-    assert not (tmp_path / DLL_NAME).exists()
-    assert path.read_bytes() == _executable(code)
+    for action, code in (("patch", FIXED_CODE), ("restore", ORIGINAL_CODE)):
+        _main(tmp_path, "patch", "--method", "dll", capsys=capsys)
+        assert _main(tmp_path, action, capsys=capsys)[0] == 0
+        assert not (tmp_path / DLL_NAME).exists()
+        assert path.read_bytes() == _executable(code)
+
+
+def test_the_dll_already_there_is_already_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, ORIGINAL_CODE)
+    _main(tmp_path, "patch", "--method", "dll", capsys=capsys)
+    status, out = _main(
+        tmp_path, "patch", "--method", "dll", "--json", capsys=capsys
+    )
+    assert (status, json.loads(out)["changed"]) == (0, False)
 
 
 def test_a_dll_of_another_make_is_never_replaced_or_removed(
-    tmp_path: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    path = _write(tmp_path, ORIGINAL_CODE)
+    _write(tmp_path, ORIGINAL_CODE)
     other = tmp_path / DLL_NAME
     other.write_bytes(b"MZ another mod")
-    with pytest.raises(UserError, match="another make"):
-        DeathLagPatcher(DeathLagRequest(path, DeathLag.DLL)).run()
-    DeathLagPatcher(DeathLagRequest(path, DeathLag.FIXED)).run()
+    assert _main(tmp_path, "patch", "--method", "dll", capsys=capsys) == (
+        1,
+        "",
+    )
+    assert _main(tmp_path, "patch", capsys=capsys)[0] == 0
+    assert _main(tmp_path, "restore", capsys=capsys)[0] == 0
     assert other.read_bytes() == b"MZ another mod"
 
 
-def test_dll_dry_run_and_a_running_game_change_nothing(tmp_path: Path) -> None:
-    path = _write(tmp_path, ORIGINAL_CODE)
-    DeathLagPatcher(DeathLagRequest(path, DeathLag.DLL, dry_run=True)).run()
-    with pytest.raises(UserError, match="Close Dark Souls II"):
-        DeathLagPatcher(
-            DeathLagRequest(path, DeathLag.DLL, game_running=True)
-        ).run()
+def test_a_dry_run_of_the_dll_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, ORIGINAL_CODE)
+    assert _main(
+        tmp_path, "patch", "--method", "dll", "--dry-run", capsys=capsys
+    ) == (0, "patched\n")
     assert [p.name for p in tmp_path.iterdir()] == ["DarkSoulsII.exe"]
 
 
-def test_the_dll_over_an_unknown_executable_is_refused(tmp_path: Path) -> None:
-    path = _write(tmp_path, b"\0" * 45)
-    with pytest.raises(UserError, match="not a game version"):
-        DeathLagPatcher(DeathLagRequest(path, DeathLag.DLL)).run()
+def test_the_dll_over_an_unknown_executable_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(tmp_path, b"\0" * 45)
+    assert _main(tmp_path, "patch", "--method", "dll", capsys=capsys) == (
+        1,
+        "",
+    )
     assert [p.name for p in tmp_path.iterdir()] == ["DarkSoulsII.exe"]
-
-
-def test_the_command_takes_dll(tmp_path: Path) -> None:
-    path = _write(tmp_path, ORIGINAL_CODE)
-    arguments = ["ds2", "death-lag-fix", "--executable", str(path)]
-    assert application.main([*arguments, "dll"]) == 0
-    assert (tmp_path / DLL_NAME).exists()
-    assert application.main([*arguments, "on"]) == 0
-    assert not (tmp_path / DLL_NAME).exists()
-    assert path.read_bytes() == _executable(FIXED_CODE)

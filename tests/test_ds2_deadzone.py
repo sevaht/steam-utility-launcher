@@ -1,4 +1,4 @@
-"""The Dark Souls II deadzone patch, on stand-in executables."""
+"""The Dark Souls II deadzone fix, on stand-in executables."""
 
 from __future__ import annotations
 
@@ -7,16 +7,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from steam_utility_launcher import application, ds2_bindings, ds2_deadzone
+from steam_utility_launcher import application
 from steam_utility_launcher.ds2_deadzone import (
     CENTERED_CODE,
     ORIGINAL_CODE,
+    PATCH,
     PATCH_OFFSET,
-    Deadzone,
-    DeadzonePatcher,
-    DeadzoneRequest,
 )
-from steam_utility_launcher.errors import UserError
+from steam_utility_launcher.patching import PatchState
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -43,88 +41,73 @@ def _restore_logging() -> Iterator[None]:
     root.setLevel(level)
 
 
-@pytest.fixture(autouse=True)
-def _game_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ds2_bindings, "game_is_running", lambda _host: False)
-
-
 def test_the_two_versions_are_the_same_size_and_differ() -> None:
     assert len(ORIGINAL_CODE) == len(CENTERED_CODE) == 202
     assert ORIGINAL_CODE != CENTERED_CODE
 
 
-def test_deadzone_of_recognizes_each_and_nothing_else() -> None:
-    assert ds2_deadzone.deadzone_of(_executable(ORIGINAL_CODE)) is (
-        Deadzone.ORIGINAL
+def test_the_patch_recognizes_each_version_and_nothing_else() -> None:
+    assert PATCH.state_of(_executable(ORIGINAL_CODE)) is PatchState.ORIGINAL
+    assert PATCH.state_of(_executable(CENTERED_CODE)) is PatchState.PATCHED
+    assert PATCH.state_of(_executable(b"\0" * 202)) is (
+        PatchState.UNRECOGNIZED
     )
-    assert ds2_deadzone.deadzone_of(_executable(CENTERED_CODE)) is (
-        Deadzone.CENTERED
-    )
-    assert ds2_deadzone.deadzone_of(_executable(b"\0" * 202)) is (
-        Deadzone.UNKNOWN
-    )
-    assert ds2_deadzone.deadzone_of(b"short") is Deadzone.UNKNOWN
-
-
-def test_on_and_off_switch_only_the_function(tmp_path: Path) -> None:
-    path = _write(tmp_path, ORIGINAL_CODE)
-    DeadzonePatcher(DeadzoneRequest(path, Deadzone.CENTERED)).run()
-    assert path.read_bytes() == _executable(CENTERED_CODE)
-    DeadzonePatcher(DeadzoneRequest(path, Deadzone.ORIGINAL)).run()
-    assert path.read_bytes() == _executable(ORIGINAL_CODE)
-    assert [p.name for p in tmp_path.iterdir()] == ["DarkSoulsII.exe"]
-
-
-def test_status_and_dry_run_change_nothing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    path = _write(tmp_path, ORIGINAL_CODE)
-    DeadzonePatcher(DeadzoneRequest(path)).run()
-    DeadzonePatcher(
-        DeadzoneRequest(path, Deadzone.CENTERED, dry_run=True)
-    ).run()
-    assert path.read_bytes() == _executable(ORIGINAL_CODE)
-    assert "Would switch" in capsys.readouterr().out
-
-
-def test_it_is_already_so_changes_nothing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    path = _write(tmp_path, CENTERED_CODE)
-    DeadzonePatcher(DeadzoneRequest(path, Deadzone.CENTERED)).run()
-    assert "Already so" in capsys.readouterr().out
-
-
-def test_an_unknown_executable_is_never_written(tmp_path: Path) -> None:
-    path = _write(tmp_path, b"\0" * 202)
-    with pytest.raises(UserError, match="not a game version"):
-        DeadzonePatcher(DeadzoneRequest(path, Deadzone.CENTERED)).run()
-    assert path.read_bytes() == _executable(b"\0" * 202)
-    DeadzonePatcher(DeadzoneRequest(path)).run()  # just asking is fine
-
-
-def test_a_running_game_is_not_touched(tmp_path: Path) -> None:
-    path = _write(tmp_path, ORIGINAL_CODE)
-    request = DeadzoneRequest(path, Deadzone.CENTERED, game_running=True)
-    with pytest.raises(UserError, match="Close Dark Souls II"):
-        DeadzonePatcher(request).run()
-    assert path.read_bytes() == _executable(ORIGINAL_CODE)
-
-
-def test_a_missing_file_is_a_user_error(tmp_path: Path) -> None:
-    with pytest.raises(UserError, match="Could not read"):
-        DeadzonePatcher(DeadzoneRequest(tmp_path / "nope.exe")).run()
+    assert PATCH.state_of(b"short") is PatchState.UNRECOGNIZED
 
 
 @pytest.mark.parametrize("group", ["ds2", "dark-souls-2"])
-def test_both_names_of_the_group_work(
+def test_status_patch_and_restore_through_either_name(
     group: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = _write(tmp_path, ORIGINAL_CODE)
     arguments = [group, "deadzone-fix", "--executable", str(path)]
-    assert application.main([*arguments, "status"]) == 0
-    assert "axial" in capsys.readouterr().out
-    assert application.main([*arguments, "on"]) == 0
+    assert application.main(arguments) == 0  # status is the default
+    assert capsys.readouterr().out == "original\n"
+    assert application.main([*arguments, "patch"]) == 0
+    assert capsys.readouterr().out == "patched\n"
     assert path.read_bytes() == _executable(CENTERED_CODE)
-    assert application.main([*arguments, "off"]) == 0
+    assert application.main([*arguments, "status"]) == 0
+    assert capsys.readouterr().out == "patched\n"
+    assert application.main([*arguments, "restore"]) == 0
+    assert capsys.readouterr().out == "original\n"
     assert path.read_bytes() == _executable(ORIGINAL_CODE)
+    assert [entry.name for entry in tmp_path.iterdir()] == [path.name]
+
+
+def test_a_dry_run_changes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write(tmp_path, ORIGINAL_CODE)
+    arguments = ["ds2", "deadzone-fix", "--executable", str(path)]
+    assert application.main([*arguments, "patch", "--dry-run"]) == 0
+    assert capsys.readouterr().out == "patched\n"
+    assert path.read_bytes() == _executable(ORIGINAL_CODE)
+
+
+def test_an_unknown_executable_is_refused_and_untouched(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write(tmp_path, b"\0" * 202)
+    arguments = ["ds2", "deadzone-fix", "--executable", str(path)]
+    assert application.main([*arguments, "patch"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "not a game version" in captured.err
+    assert path.read_bytes() == _executable(b"\0" * 202)
+    assert application.main(arguments) == 0  # just asking is fine
+    assert capsys.readouterr().out == "unrecognized\n"
+
+
+def test_a_missing_file_is_an_error_with_no_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    arguments = [
+        "ds2",
+        "deadzone-fix",
+        "--executable",
+        str(tmp_path / "nope.exe"),
+    ]
+    assert application.main(arguments) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Could not read" in captured.err

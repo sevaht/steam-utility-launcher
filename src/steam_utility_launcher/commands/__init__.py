@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from steam_utility_launcher.commands.base import Command, Context, UsageError
 from steam_utility_launcher.commands.ds2_commands import Ds2Command
+from steam_utility_launcher.commands.mina_commands import MinaCommand
 from steam_utility_launcher.commands.prefix_commands import (
     ManualCommand,
     PrefixPathCommand,
@@ -38,5 +39,6 @@ def default_commands() -> list[Command]:
         ProtonCommand(),
         ZEmuCommand(),
         Ds2Command(),
+        MinaCommand(),
         HwidAccessCommand(),
     ]

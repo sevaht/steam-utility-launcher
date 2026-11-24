@@ -40,6 +40,10 @@ Wine and Proton load a DLL a program imports from the program's own folder
 before their own, so that is all it takes, there as on Windows. The executable
 is changed or the DLL is installed, never both.
 
+The fix is `patch` (by `--method executable`, the default, or `--method dll`)
+and `restore`; see :mod:`steam_utility_launcher.patching` for what they and
+`status` answer.
+
 Nothing of the game is bundled. The two byte strings below are that range of
 the handler, as the game has it and as it is fixed; they are how this program
 recognizes which one an executable has, and what it writes to switch between
@@ -50,17 +54,27 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, unique
 from importlib import resources
 from typing import TYPE_CHECKING
 
 from steam_utility_launcher.errors import UserError
 from steam_utility_launcher.file_saver import FileSaver
+from steam_utility_launcher.patching import (
+    ByteEdit,
+    BytePatch,
+    FixReport,
+    FixTarget,
+    PatchMethod,
+    PatchState,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+FIX_NAME = "death-lag-fix"
 
 # The file offset of virtual address 0x140b5e82c, in the executable's first
 # code section.
@@ -82,22 +96,10 @@ DLL_RESOURCE = "ds2_death_lag_dinput8.dll"
 DLL_NAME = "dinput8.dll"
 
 
-class DeathLag(Enum):
-    ORIGINAL = (
-        "the game's own achievement handling (the one that can slow the"
-        " game down with every death)"
-    )
-    FIXED = (
-        "the fixed achievement handling, in the executable (no slowdown with"
-        " deaths)"
-    )
-    DLL = (
-        "the fixed achievement handling, made by the dinput8.dll in the"
-        " game's folder (no slowdown with deaths)"
-    )
-    UNKNOWN = "an executable this does not recognize"
+PATCH = BytePatch((ByteEdit(PATCH_OFFSET, ORIGINAL_CODE, FIXED_CODE),))
 
 
+@unique
 class _Dll(Enum):
     ABSENT = "absent"
     OURS = "ours"
@@ -105,142 +107,162 @@ class _Dll(Enum):
 
 
 def bundled_dll() -> bytes:
+    """The bytes of the dinput8.dll that makes the fix in memory."""
     source = resources.files("steam_utility_launcher") / "resources"
     return (source / DLL_RESOURCE).read_bytes()
 
 
-def _read(path: Path) -> bytes:
-    try:
-        return path.read_bytes()
-    except OSError as error:
-        msg = f"Could not read {path}: {error}"
-        raise UserError(msg) from error
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Steps:
+    """What a switch has to do to the game's folder."""
+
+    write_executable: bool
+    install_dll: bool
+    remove_dll: bool
+
+    @property
+    def is_needed(self) -> bool:
+        return self.write_executable or self.install_dll or self.remove_dll
 
 
-def _code_in(data: bytes) -> bytes:
-    return data[PATCH_OFFSET : PATCH_OFFSET + len(ORIGINAL_CODE)]
+@dataclass(frozen=True, kw_only=True)
+class DeathLagFix:
+    """The fix, made in the executable or by a DLL beside it.
 
+    Attributes:
+        target: The game's executable, and the terms of the run.
+        method: Where `patch` makes the fix: in the executable, or, leaving
+            the executable as the game has it, by the dinput8.dll. The
+            other methods' files are removed, so only one is ever there.
+            `status` and `restore` don't use it.
+    """
 
-def death_lag_of(data: bytes) -> DeathLag:
-    """Which handling the executable's bytes have."""
-    code = _code_in(data)
-    if code == ORIGINAL_CODE:
-        return DeathLag.ORIGINAL
-    if code == FIXED_CODE:
-        return DeathLag.FIXED
-    return DeathLag.UNKNOWN
+    target: FixTarget
+    method: PatchMethod
 
+    @property
+    def _dll_path(self) -> Path:
+        return self.target.executable.with_name(DLL_NAME)
 
-def _with(data: bytes, code: bytes) -> bytes:
-    end = PATCH_OFFSET + len(code)
-    return data[:PATCH_OFFSET] + code + data[end:]
-
-
-def _dll_in(path: Path) -> _Dll:
-    if not path.exists():
-        return _Dll.ABSENT
-    try:
-        ours = path.read_bytes() == bundled_dll()
-    except OSError:
-        return _Dll.OTHER
-    return _Dll.OURS if ours else _Dll.OTHER
-
-
-@dataclass(frozen=True)
-class DeathLagRequest:
-    executable: Path
-    # None to only say which it is.
-    want: DeathLag | None = None
-    dry_run: bool = False
-    game_running: bool = False
-
-
-class DeathLagPatcher:
-    """Tells, or switches, the achievement handling of the game: changed in
-    its executable, by a DLL, or the game's own."""
-
-    def __init__(self, request: DeathLagRequest) -> None:
-        self.request = request
-
-    def run(self) -> None:
-        request = self.request
-        dll_path = request.executable.with_name(DLL_NAME)
-        data = _read(request.executable)
-        in_exe = death_lag_of(data)
-        dll = _dll_in(dll_path)
-        # The DLL changes nothing in an executable that is already fixed.
-        current = (
-            DeathLag.DLL
-            if dll is _Dll.OURS and in_exe is DeathLag.ORIGINAL
-            else in_exe
-        )
-        print(f"{request.executable}: {current.value}.")
-        if dll is _Dll.OTHER:
-            print(
-                f"There is a {DLL_NAME} of another make in that folder, which"
-                " is left alone."
-            )
-        if in_exe is DeathLag.UNKNOWN:
-            msg = (
-                "This is not a game version the patch is known for, so it is"
-                " left alone. After a game update, verify the game files in"
-                " Steam."
-            )
-            if request.want is not None:
-                raise UserError(msg)
-            return
-        if request.want is None:
-            return
-        self._check_wanted(dll)
-        want_code = (
-            FIXED_CODE if request.want is DeathLag.FIXED else ORIGINAL_CODE
-        )
-        stale_dll = dll is _Dll.OURS and request.want is not DeathLag.DLL
-        if current is request.want and not stale_dll:
-            print("Already so; nothing to do.")
-            return
-        if request.dry_run:
-            print(f"Would switch to {request.want.value}.")
-            return
-        if request.game_running:
-            msg = (
-                "Close Dark Souls II first; its files can't be replaced while"
-                " it runs."
-            )
-            raise UserError(msg)
+    def _dll(self) -> _Dll:
+        path = self._dll_path
+        if not path.exists():
+            return _Dll.ABSENT
         try:
-            self._switch(data, dll, dll_path, want_code)
-        except OSError as error:
-            msg = f"Could not change the game's files: {error}"
-            raise UserError(msg) from error
-        print(f"Switched to {request.want.value}.")
+            ours = path.read_bytes() == bundled_dll()
+        except OSError:
+            return _Dll.OTHER
+        return _Dll.OURS if ours else _Dll.OTHER
 
-    def _check_wanted(self, dll: _Dll) -> None:
-        want = self.request.want
-        if want is DeathLag.UNKNOWN:
-            msg = "Pick the original, the fixed or the DLL handling."
-            raise ValueError(msg)
-        if want is DeathLag.DLL and dll is _Dll.OTHER:
+    def status(self) -> FixReport:
+        """Says whether the fix is made, and where."""
+        exe_state = PATCH.state_of(self.target.read())
+        dll = self._dll()
+        self._warn_of_other_dll(dll)
+        state, method = self._current(exe_state, dll)
+        return self._report(state, method, is_changed=False)
+
+    def patch(self) -> FixReport:
+        """Makes the fix by the method, taking out the other's files."""
+        return self._switch(PatchState.PATCHED, self.method)
+
+    def restore(self) -> FixReport:
+        """Takes the fix out of the executable, and ours out of the folder."""
+        return self._switch(PatchState.ORIGINAL, None)
+
+    @staticmethod
+    def _current(
+        exe_state: PatchState, dll: _Dll
+    ) -> tuple[PatchState, PatchMethod | None]:
+        if exe_state is PatchState.PATCHED:
+            return PatchState.PATCHED, PatchMethod.EXECUTABLE
+        # The DLL changes nothing in an executable that is already fixed.
+        if exe_state is PatchState.ORIGINAL and dll is _Dll.OURS:
+            return PatchState.PATCHED, PatchMethod.DLL
+        return exe_state, None
+
+    def _warn_of_other_dll(self, dll: _Dll) -> None:
+        if dll is _Dll.OTHER:
+            logger.warning(
+                "There is a %s of another make beside %s, which is left"
+                " alone.",
+                DLL_NAME,
+                self.target.executable.name,
+            )
+
+    def _switch(
+        self, want: PatchState, method: PatchMethod | None
+    ) -> FixReport:
+        data = self.target.read()
+        exe_state = PATCH.state_of(data)
+        self.target.require_known_version(exe_state)
+        dll = self._dll()
+        self._warn_of_other_dll(dll)
+        if method is PatchMethod.DLL and dll is _Dll.OTHER:
             msg = (
                 f"There is a {DLL_NAME} of another make in the game's"
                 " folder; it would have to be moved away first."
             )
             raise UserError(msg)
+        want_dll = method is PatchMethod.DLL
+        steps = _Steps(
+            write_executable=exe_state
+            is not self._executable_state_for(method),
+            install_dll=want_dll and dll is not _Dll.OURS,
+            remove_dll=dll is _Dll.OURS and not want_dll,
+        )
+        if not steps.is_needed:
+            logger.info("%s is already %s.", self.target.executable, want)
+            return self._report(want, method, is_changed=False)
+        if self.target.is_dry_run:
+            logger.info("Would make %s %s.", self.target.executable, want)
+            return self._report(want, method, is_changed=True)
+        self.target.require_game_closed()
+        try:
+            self._apply(steps, data, method)
+        except OSError as error:
+            msg = f"Could not change the game's files: {error}"
+            raise UserError(msg) from error
+        logger.info("Made %s %s.", self.target.executable, want)
+        return self._report(want, method, is_changed=True)
 
-    def _switch(
-        self, data: bytes, dll: _Dll, dll_path: Path, want_code: bytes
+    @staticmethod
+    def _executable_state_for(method: PatchMethod | None) -> PatchState:
+        # The DLL makes the fix in memory, so the file is the game's own.
+        if method is PatchMethod.EXECUTABLE:
+            return PatchState.PATCHED
+        return PatchState.ORIGINAL
+
+    def _apply(
+        self, steps: _Steps, data: bytes, method: PatchMethod | None
     ) -> None:
-        request = self.request
         saver = FileSaver()
-        if request.want is DeathLag.DLL:
+        if steps.remove_dll:
+            self._dll_path.unlink()
+        if steps.write_executable:
             # The executable is not backed up: the code it had is in this
             # module, and Steam's "verify" restores the whole file anyway.
-            if _code_in(data) != want_code:
-                saver.write(request.executable, _with(data, want_code))
-            if dll is not _Dll.OURS:
-                saver.write(dll_path, bundled_dll())
-            return
-        if dll is _Dll.OURS:
-            dll_path.unlink()
-        if _code_in(data) != want_code:
-            saver.write(request.executable, _with(data, want_code))
+            changed = (
+                PATCH.applied_to(data)
+                if self._executable_state_for(method) is PatchState.PATCHED
+                else PATCH.reverted_in(data)
+            )
+            saver.write(self.target.executable, changed)
+        if steps.install_dll:
+            saver.write(self._dll_path, bundled_dll())
+
+    def _report(
+        self,
+        state: PatchState,
+        method: PatchMethod | None,
+        *,
+        is_changed: bool,
+    ) -> FixReport:
+        return FixReport(
+            fix=FIX_NAME,
+            path=self.target.executable,
+            state=state,
+            method=method if state is PatchState.PATCHED else None,
+            is_changed=is_changed,
+            is_dry_run=self.target.is_dry_run,
+        )

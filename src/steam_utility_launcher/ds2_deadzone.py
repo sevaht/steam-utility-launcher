@@ -10,22 +10,21 @@ Nothing of the game is bundled. The two byte strings below are that one
 function, as it is and as the mod has it; they are how this program recognizes
 which one an executable has, and what it writes to switch between them. An
 executable that has neither (another game version) is left alone.
+
+The fix is `patch` (the centered deadzone) and `restore` (the game's own); see
+:mod:`steam_utility_launcher.patching` for what they and `status` answer.
 """
 
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass
-from enum import Enum
-from typing import TYPE_CHECKING
+from steam_utility_launcher.patching import (
+    ByteEdit,
+    BytePatch,
+    ExecutablePatcher,
+    FixTarget,
+)
 
-from steam_utility_launcher.errors import UserError
-from steam_utility_launcher.file_saver import FileSaver
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-logger = logging.getLogger(__name__)
+FIX_NAME = "deadzone-fix"
 
 GAME_EXECUTABLE = "DarkSoulsII.exe"
 PATCH_OFFSET = 0xB08A1B
@@ -51,93 +50,9 @@ CENTERED_CODE = bytes.fromhex(
 )
 
 
-class Deadzone(Enum):
-    ORIGINAL = "the game's own (axial) deadzone"
-    CENTERED = "the centered (round, 36%) deadzone"
-    UNKNOWN = "an executable this does not recognize"
+PATCH = BytePatch((ByteEdit(PATCH_OFFSET, ORIGINAL_CODE, CENTERED_CODE),))
 
 
-def _read(path: Path) -> bytes:
-    try:
-        return path.read_bytes()
-    except OSError as error:
-        msg = f"Could not read {path}: {error}"
-        raise UserError(msg) from error
-
-
-def _code_in(data: bytes) -> bytes:
-    return data[PATCH_OFFSET : PATCH_OFFSET + len(ORIGINAL_CODE)]
-
-
-def deadzone_of(data: bytes) -> Deadzone:
-    """Which deadzone the executable's bytes have."""
-    code = _code_in(data)
-    if code == ORIGINAL_CODE:
-        return Deadzone.ORIGINAL
-    if code == CENTERED_CODE:
-        return Deadzone.CENTERED
-    return Deadzone.UNKNOWN
-
-
-def _with(data: bytes, code: bytes) -> bytes:
-    end = PATCH_OFFSET + len(code)
-    return data[:PATCH_OFFSET] + code + data[end:]
-
-
-@dataclass(frozen=True)
-class DeadzoneRequest:
-    executable: Path
-    # None to only say which it is.
-    want: Deadzone | None = None
-    dry_run: bool = False
-    game_running: bool = False
-
-
-class DeadzonePatcher:
-    """Tells, or switches, the deadzone of the game's executable."""
-
-    def __init__(self, request: DeadzoneRequest) -> None:
-        self.request = request
-
-    def run(self) -> None:
-        request = self.request
-        data = _read(request.executable)
-        current = deadzone_of(data)
-        print(f"{request.executable}: {current.value}.")
-        if current is Deadzone.UNKNOWN:
-            msg = (
-                "This is not a game version the patch is known for, so it is"
-                " left alone. After a game update, verify the game files in"
-                " Steam."
-            )
-            if request.want is not None:
-                raise UserError(msg)
-            return
-        if request.want is None:
-            return
-        if request.want is Deadzone.UNKNOWN:
-            msg = "Pick the original or the centered deadzone."
-            raise ValueError(msg)
-        if current is request.want:
-            print("Already so; nothing to do.")
-            return
-        if request.dry_run:
-            print(f"Would switch to {request.want.value}.")
-            return
-        if request.game_running:
-            msg = "Close Dark Souls II first; the file can't be replaced while it runs."
-            raise UserError(msg)
-        code = (
-            CENTERED_CODE
-            if request.want is Deadzone.CENTERED
-            else ORIGINAL_CODE
-        )
-        saver = FileSaver()
-        try:
-            # The executable is not backed up: the code it had is in this
-            # module, and Steam's "verify" restores the whole file anyway.
-            saver.write(request.executable, _with(data, code))
-        except OSError as error:
-            msg = f"Could not write {request.executable}: {error}"
-            raise UserError(msg) from error
-        print(f"Switched to {request.want.value}.")
+def deadzone_fix(target: FixTarget) -> ExecutablePatcher:
+    """The centered deadzone, as a fix of `target`'s executable."""
+    return ExecutablePatcher(FIX_NAME, PATCH, target)

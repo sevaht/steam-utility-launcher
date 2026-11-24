@@ -6,3 +6,6 @@ Z1_BATTLE_ROYALE_ID = "433850"
 
 # Dark Souls II: Scholar of the First Sin.
 DS2_SOTFS_ID = "335300"
+
+# Mina the Hollower.
+MINA_THE_HOLLOWER_ID = "1875580"
