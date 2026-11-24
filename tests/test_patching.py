@@ -104,7 +104,7 @@ def test_a_report_is_its_state_word_or_a_line_of_json() -> None:
     assert report.as_text() == "patched"
     assert json.loads(report.as_json()) == {
         "fix": "a-fix",
-        "path": "/game",
+        "path": str(Path("/game")),
         "state": "patched",
         "method": "dll",
         "changed": True,
